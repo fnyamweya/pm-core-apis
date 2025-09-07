@@ -3,6 +3,10 @@ import propertyLeasePaymentRepository from '../../repositories/properties/proper
 import { logger } from '../../utils/logger';
 import RedisCache from '../../utils/redisCache';
 import { BaseService } from '../baseService';
+import propertyLeaseAgreementRepository from '../../repositories/properties/propertyLeaseAgreementRepository';
+import transactionRepository from '../../repositories/transactions/transactionRepository';
+import { TransactionStatus, TransactionType } from '../../constants/transactions';
+import smsService from '../sms/smsService';
 
 interface CreatePaymentDTO {
   leaseId: string;
@@ -47,15 +51,52 @@ class PropertyLeasePaymentService extends BaseService<PropertyLeasePaymentEntity
 
   async createPayment(data: CreatePaymentDTO): Promise<PropertyLeasePaymentEntity> {
     this.logger.info('Creating lease payment', { data });
+    // fetch lease with relations to derive organization and currency
+    const lease = await propertyLeaseAgreementRepository.findOne({ where: { id: data.leaseId } });
+    if (!lease) throw new Error(`Lease ${data.leaseId} not found`);
+
+    // derive organization from lease.organization or lease.unit.property.organization
+    const organization = (lease as any).organization || (lease as any).unit?.property?.organization;
+
+    // Create transaction record
+    const txn = await transactionRepository.createTransaction({
+      type: TransactionType.PAYMENT,
+      status: TransactionStatus.COMPLETED,
+      amount: data.amount,
+      currency: 'KES',
+      signature: `${data.tenantId}:${data.leaseId}:${Date.now()}`,
+      metadata: { leaseId: data.leaseId, tenantId: data.tenantId, typeCode: data.typeCode },
+    });
+
+    // Validate payment type belongs to org (or is global)
+    const type = (await (await import('../../repositories/properties/propertyLeasePaymentTypeRepository')).default.getPaymentTypeByCode(data.typeCode));
+    if (!type) throw new Error(`Payment type ${data.typeCode} not found`);
+    if (organization && (type as any).organization && (type as any).organization.id !== (organization as any).id) {
+      throw new Error('Payment type not allowed for this organization');
+    }
+
     const payment = await propertyLeasePaymentRepository.create({
       lease:  { id: data.leaseId }   as any,
       tenant: { id: data.tenantId }  as any,
+      organization: organization ? ({ id: (organization as any).id } as any) : undefined,
       amount: data.amount,
       paidAt: data.paidAt,
       type:   { code: data.typeCode } as any,
-      metadata: data.metadata,
+      metadata: { ...data.metadata, transactionId: txn.id },
     });
     await this.cachePayment(payment);
+
+    // fire-and-forget SMS confirmation to tenant
+    try {
+      const tenantUser = (payment.tenant as any)?.user;
+      const phone = tenantUser?.phone;
+      if (phone) {
+        const msg = `Payment received: ${data.amount} for lease ${data.leaseId}. Thank you.`;
+        await smsService.sendSms(phone, msg, 'LEASE_PAYMENT_RECEIVED');
+      }
+    } catch (e) {
+      logger.warn('Failed to send payment confirmation SMS', { error: e });
+    }
     return payment;
   }
 

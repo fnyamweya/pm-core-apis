@@ -1,7 +1,8 @@
 import { IsJSON, IsString, MaxLength } from 'class-validator';
-import { Column, Entity, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, Entity, ManyToOne, PrimaryGeneratedColumn, Index } from 'typeorm';
 import { BaseModel } from '../baseEntity';
 import { PaymentProvider } from './paymentProviderEntity';
+import { Organization } from '../organizations/organizationEntity';
 
 @Entity('payment_provider_configs')
 export class PaymentProviderConfig extends BaseModel {
@@ -41,4 +42,11 @@ export class PaymentProviderConfig extends BaseModel {
     nullable: false,
   })
   paymentProvider: PaymentProvider;
+
+  /**
+   * Optional owning organization for multi-tenant provider configs. Null => global default.
+   */
+  @ManyToOne(() => Organization, { nullable: true, onDelete: 'CASCADE' })
+  @Index('IDX_provider_config_org')
+  organization?: Organization | null;
 }

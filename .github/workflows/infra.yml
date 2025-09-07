@@ -26,6 +26,7 @@ env:
   AWS_REGION: ${{ inputs.region }}
   CREATE_OIDC: ${{ inputs.create_oidc }}
 
+# inputs.* is available here; avoid env.* (that caused your earlier error)
 concurrency:
   group: infra-${{ github.workflow }}-${{ inputs.env }}-${{ inputs.app_name }}
   cancel-in-progress: false
@@ -47,12 +48,37 @@ jobs:
             exit 1
           fi
 
+      - name: Preflight – ensure CDK project exists in infra/
+        run: |
+          if [ ! -f "infra/cdk.json" ] || [ ! -d "infra/bin" ] || [ ! -d "infra/lib" ]; then
+            echo "::error::CDK project not found under infra/ (expect infra/cdk.json, infra/bin, infra/lib)."
+            exit 1
+          fi
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
+      # Optional caches (only used if a lockfile exists)
+      - name: Cache pnpm store
+        if: hashFiles('infra/pnpm-lock.yaml') != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('infra/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-pnpm-
+
+      - name: Cache npm
+        if: hashFiles('infra/package-lock.json') != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('infra/package-lock.json') }}
+          restore-keys: ${{ runner.os }}-npm-
+
       - name: Install deps (CDK + project)
+        working-directory: infra
         run: |
           set -e
           if [ -f pnpm-lock.yaml ]; then
@@ -79,6 +105,7 @@ jobs:
           echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
 
       - name: Ensure CDK is bootstrapped (idempotent)
+        working-directory: infra
         run: |
           set -euo pipefail
           if aws cloudformation describe-stacks --stack-name CDKToolkit --region "${AWS_REGION}" >/dev/null 2>&1; then
@@ -90,26 +117,29 @@ jobs:
           fi
 
       - name: CDK synth (early fail if invalid)
+        working-directory: infra
         run: |
           npx cdk synth \
-            -a "npx ts-node --transpile-only bin/app.ts" \
             -c env=${ENV} \
             -c appName=${APP_NAME} \
             -c region=${AWS_REGION}
 
       - name: Deploy Network
+        working-directory: infra
         run: |
           npx cdk deploy --require-approval never \
             "${ENV}-${APP_NAME}-network" \
             -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION}
 
       - name: Deploy ECR
+        working-directory: infra
         run: |
           npx cdk deploy --require-approval never \
             "${ENV}-${APP_NAME}-ecr" \
             -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION}
 
       - name: Deploy Service (initial; imageTag=latest)
+        working-directory: infra
         run: |
           npx cdk deploy --require-approval never \
             "${ENV}-${APP_NAME}-svc" \
@@ -118,6 +148,7 @@ jobs:
 
       - name: (Optional) Create OIDC role stack
         if: ${{ env.CREATE_OIDC == 'true' }}
+        working-directory: infra
         run: |
           npx cdk deploy --require-approval never \
             "${ENV}-${APP_NAME}-gh-oidc" \

@@ -2116,9 +2116,39 @@ router.get(
  *         application/json:
  *           schema:
  *             type: object
+ *             properties:
+ *               tenantId: { type: string }
+ *               amount: { type: number }
+ *               paidAt: { type: string, format: date-time }
+ *               typeCode: { type: string }
+ *               metadata: { type: object }
+ *           examples:
+ *             ownerRecord:
+ *               summary: Record a rent payment
+ *               value:
+ *                 tenantId: "a7f6b0e4-12ab-4cde-9f01-23456789abcd"
+ *                 amount: 45000
+ *                 paidAt: "2025-09-10T11:00:00Z"
+ *                 typeCode: "RENT"
+ *                 metadata:
+ *                   note: "Cash at office"
  *     responses:
  *       201:
  *         description: Created
+ *         content:
+ *           application/json:
+ *             examples:
+ *               created:
+ *                 value:
+ *                   data:
+ *                     id: "pay_123"
+ *                     amount: 45000
+ *                     paidAt: "2025-09-10T11:00:00Z"
+ *                     type:
+ *                       code: "RENT"
+ *                     tenant:
+ *                       id: "a7f6b0e4-12ab-4cde-9f01-23456789abcd"
+ *                   message: "Payment recorded successfully"
  */
 router.post(
   '/:propertyId/units/:unitId/leases/:leaseId/payments',
@@ -2126,6 +2156,43 @@ router.post(
   requireOrgRoleForProperty('propertyId', [OrganizationUserRole.OWNER, OrganizationUserRole.CARETAKER]),
   validate(createPaymentSchema),
   asyncHandler(PropertyLeasePaymentController.createPayment.bind(PropertyLeasePaymentController))
+);
+
+/**
+ * @route POST /leases/{leaseId}/payments/initiate
+ * @desc   Tenant-initiated payment (M-Pesa STK) – returns checkout/session
+ * @access Protected
+ * @openapi
+ * /leases/{leaseId}/payments/initiate:
+ *   post:
+ *     tags: [Payments]
+ *     summary: Initiate tenant payment for a lease
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: leaseId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               amount: { type: number }
+ *           examples:
+ *             initiate:
+ *               value: { amount: 45000 }
+ *     responses:
+ *       201:
+ *         description: Initiated
+ */
+router.post(
+  '/leases/:leaseId/payments/initiate',
+  authenticate('access'),
+  asyncHandler(PropertyLeasePaymentController.initiateTenantPayment.bind(PropertyLeasePaymentController))
 );
 
 /**
@@ -2201,6 +2268,59 @@ router.get(
 );
 
 /**
+ * @route POST /properties/:propertyId/units/:unitId/leases/:leaseId/payments/remind
+ * @desc   Send due payment reminder SMS to tenant if due
+ * @access Protected
+ */
+router.post(
+  '/:propertyId/units/:unitId/leases/:leaseId/payments/remind',
+  authenticate('access'),
+  requireOrgRoleForProperty('propertyId', [OrganizationUserRole.OWNER, OrganizationUserRole.CARETAKER]),
+  asyncHandler(PropertyLeasePaymentController.remindDuePayment.bind(PropertyLeasePaymentController))
+);
+
+/**
+ * @route GET /tenants/:tenantId/payments
+ * @desc   List payments for a tenant (self-service)
+ * @access Protected
+ * @openapi
+ * /properties/tenants/{tenantId}/payments:
+ *   get:
+ *     tags: [Payments]
+ *     summary: List payments for the authenticated tenant
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: tenantId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: OK
+ *         content:
+ *           application/json:
+ *             examples:
+ *               list:
+ *                 value:
+ *                   data:
+ *                     - id: "pay_1"
+ *                       amount: 45000
+ *                       paidAt: "2025-09-01T10:00:00Z"
+ *                       type: { code: "RENT" }
+ *                     - id: "pay_2"
+ *                       amount: 5000
+ *                       paidAt: "2025-09-05T09:00:00Z"
+ *                       type: { code: "LATE_FEE" }
+ *                   message: "Payments for tenant retrieved successfully"
+ */
+router.get(
+  '/tenants/:tenantId/payments',
+  authenticate('access'),
+  asyncHandler(PropertyLeasePaymentController.getPaymentsByTenant.bind(PropertyLeasePaymentController))
+);
+
+/**
  * @route GET /properties/:propertyId/units/:unitId/leases/:leaseId/payments/range
  * @desc   List payments in a date range
  * @access Protected
@@ -2240,5 +2360,121 @@ router.get(
   validate(getPaymentsInDateRangeSchema),
   asyncHandler(PropertyLeasePaymentController.getPaymentsInDateRange.bind(PropertyLeasePaymentController))
 );
+
+/**
+ * @route POST /payments/webhooks/mpesa
+ * @desc   M-Pesa Daraja webhook receiver
+ * @access Public (verify via shared secret / IP allow in infra)
+ */
+router.post(
+  '/payments/webhooks/mpesa',
+  asyncHandler(PropertyLeasePaymentController.mpesaWebhook.bind(PropertyLeasePaymentController))
+);
+
+/**
+ * @openapi
+ * /payments/webhooks/mpesa:
+ *   post:
+ *     tags: [Payments]
+ *     summary: LNMO Online (STK) callback (M-Pesa)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           examples:
+ *             stkCallback:
+ *               value:
+ *                 Body:
+ *                   stkCallback:
+ *                     MerchantRequestID: "29115-34620561-1"
+ *                     CheckoutRequestID: "ws_CO_191220191020363925"
+ *                     ResultCode: 0
+ *                     ResultDesc: "The service request is processed successfully."
+ *                     CallbackMetadata:
+ *                       Item:
+ *                         - Name: Amount
+ *                           Value: 10
+ *                         - Name: MpesaReceiptNumber
+ *                           Value: NLJ7RT61SV
+ *                         - Name: TransactionDate
+ *                           Value: 20191219102115
+ *                         - Name: PhoneNumber
+ *                           Value: 254700000000
+ *     responses:
+ *       200:
+ *         description: ok
+
+/**
+ * @route POST /payments/webhooks/mpesa/c2b/validate
+ * @desc   M-Pesa C2B Validation endpoint (org-specific token in header)
+ */
+router.post(
+  '/payments/webhooks/mpesa/c2b/validate',
+  asyncHandler(PropertyLeasePaymentController.mpesaC2BValidate.bind(PropertyLeasePaymentController))
+);
+
+/**
+ * @openapi
+ * /payments/webhooks/mpesa/c2b/validate:
+ *   post:
+ *     tags: [Payments]
+ *     summary: C2B Validation (M-Pesa)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           examples:
+ *             c2bValidateSample:
+ *               value:
+ *                 TransType: "Pay Bill"
+ *                 TransID: "RKTQDM7W6S"
+ *                 TransTime: "20191122063845"
+ *                 TransAmount: "10"
+ *                 BusinessShortCode: "600638"
+ *                 BillRefNumber: "Test123"
+ *                 MSISDN: "254708374149"
+ *     responses:
+ *       200:
+ *         description: Validation decision
+
+/**
+ * @route POST /payments/webhooks/mpesa/c2b/confirm
+ * @desc   M-Pesa C2B Confirmation endpoint (org-specific token in header)
+ */
+router.post(
+  '/payments/webhooks/mpesa/c2b/confirm',
+  asyncHandler(PropertyLeasePaymentController.mpesaC2BConfirm.bind(PropertyLeasePaymentController))
+);
+
+/**
+ * @openapi
+ * /payments/webhooks/mpesa/c2b/confirm:
+ *   post:
+ *     tags: [Payments]
+ *     summary: C2B Confirmation (M-Pesa)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           examples:
+ *             c2bConfirmSample:
+ *               value:
+ *                 TransactionType: "Pay Bill"
+ *                 TransID: "RKTQDM7W6S"
+ *                 TransTime: "20191122063845"
+ *                 TransAmount: "10"
+ *                 BusinessShortCode: "600638"
+ *                 BillRefNumber: "Test123"
+ *                 InvoiceNumber: ""
+ *                 OrgAccountBalance: "49197.00"
+ *                 ThirdPartyTransID: ""
+ *                 MSISDN: "254708374149"
+ *                 FirstName: "John"
+ *                 MiddleName: ""
+ *                 LastName: "Doe"
+ *     responses:
+ *       200:
+ *         description: Received
+  */
 
 export default router;

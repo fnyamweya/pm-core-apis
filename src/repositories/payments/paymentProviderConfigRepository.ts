@@ -60,6 +60,20 @@ class PaymentProviderConfigRepository extends BaseRepository<PaymentProviderConf
   }
 
   /**
+   * Retrieves all configurations for a PaymentProvider by code and organization.
+   * If orgId is null/undefined, returns global configs (organization IS NULL).
+   */
+  async getConfigsByProviderAndOrg(
+    providerCode: string,
+    orgId?: string
+  ): Promise<PaymentProviderConfig[]> {
+    const where: any = { paymentProvider: { paymentProviderCode: providerCode } };
+    if (orgId) where.organization = { id: orgId };
+    else where.organization = null as any;
+    return await this.find({ where });
+  }
+
+  /**
    * Updates a specific configuration by provider code and key.
    * @param providerCode - The unique code of the PaymentProvider.
    * @param key - The key of the configuration to update.

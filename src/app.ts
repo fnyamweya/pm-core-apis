@@ -37,8 +37,15 @@ if (env.NODE_ENV === 'development') {
   app.use(morganMiddleware);
 }
 
+// Capture raw body for webhook HMAC verification
+function rawBodySaver(req: any, _res: any, buf: Buffer) {
+  if (buf && buf.length) {
+    req.rawBody = buf.toString('utf8');
+  }
+}
+
 // Body parser, reading data from body into req.body
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json({ limit: '10kb', verify: rawBodySaver as any }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 
 // Compress all routes
