@@ -53,7 +53,16 @@ jobs:
           node-version: '20'
 
       - name: Install deps (CDK + project)
-        run: npm ci
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            corepack prepare pnpm@latest --activate
+            pnpm install --frozen-lockfile
+          elif [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
