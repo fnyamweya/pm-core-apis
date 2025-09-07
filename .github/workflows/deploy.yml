@@ -28,7 +28,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm' # uses package-lock.json; harmless if pnpm is used below
 
       - name: Enable corepack (pnpm) if present
         run: corepack enable
