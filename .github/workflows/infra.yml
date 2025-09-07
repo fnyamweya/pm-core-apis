@@ -54,6 +54,7 @@ jobs:
 
       - name: Install deps (CDK + project)
         run: |
+          set -e
           if [ -f pnpm-lock.yaml ]; then
             corepack enable
             corepack prepare pnpm@latest --activate
@@ -61,6 +62,7 @@ jobs:
           elif [ -f package-lock.json ]; then
             npm ci
           else
+            echo "::warning::No lockfile found (pnpm-lock.yaml or package-lock.json). Using 'npm install'."
             npm install
           fi
 
