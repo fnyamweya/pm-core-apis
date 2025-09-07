@@ -8,9 +8,9 @@ on:
         required: true
         default: 'dev'
       app_name:
-        description: 'Property MS APIs'
+        description: 'Stack app name (e.g., core-apis)'
         required: true
-        default: 'backend'
+        default: 'core-apis'
       region:
         description: 'AWS region'
         required: true
@@ -40,7 +40,6 @@ jobs:
           node-version: '20'
 
       - name: Install CDK deps
-        working-directory: cdk
         run: npm ci
 
       - name: Configure AWS (OIDC)
@@ -49,31 +48,25 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # If this is the first time in an account/region, keep this step.
       - name: CDK Bootstrap (first time per account/region)
-        working-directory: cdk
-        env:
-          AWS_ACCOUNT_ID: ${{ github.repository_owner_id }} # or hardcode your account id
-        run: npx cdk bootstrap aws://$AWS_ACCOUNT_ID/$AWS_REGION
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
+          npx cdk bootstrap aws://$ACCOUNT_ID/${AWS_REGION}
 
       - name: Deploy Network
-        working-directory: cdk
         run: |
           npx cdk deploy --require-approval never \
             "${ENV}-${APP_NAME}-network" \
             -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION}
 
       - name: Deploy ECR
-        working-directory: cdk
         run: |
           npx cdk deploy --require-approval never \
             "${ENV}-${APP_NAME}-ecr" \
             -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION}
 
-      - name: Deploy Service (initial)
-        working-directory: cdk
+      - name: Deploy Service (initial, imageTag=latest)
         run: |
-          # First deploy uses imageTag=latest (or any seed tag you want)
           npx cdk deploy --require-approval never \
             "${ENV}-${APP_NAME}-svc" \
             -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION} \
@@ -81,7 +74,6 @@ jobs:
 
       - name: (Optional) Create OIDC role stack
         if: ${{ env.CREATE_OIDC == 'true' }}
-        working-directory: cdk
         run: |
           npx cdk deploy --require-approval never \
             "${ENV}-${APP_NAME}-gh-oidc" \

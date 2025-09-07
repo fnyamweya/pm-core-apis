@@ -4,12 +4,14 @@ on:
   push:
     branches: ['main']
     paths-ignore:
-      - 'cdk/**'
+      - 'infra/**' # your local infra scripts
+      - 'docs/**'
       - '.github/**'
       - 'README.md'
 
 env:
-  ENV: 'dev'
+  ENV: 'dev' # change per-branch or use environments
+  APP_NAME: 'core-apis'
   AWS_REGION: 'eu-west-1'
 
 jobs:
@@ -21,17 +23,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node (for tests/build)
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install + Build + Test
-        working-directory: app
+      - name: Enable corepack (pnpm) if present
+        run: corepack enable
+
+      - name: Install + Build + Test (auto-detect pnpm/npm)
         run: |
-          npm ci
-          npm run build
-          npm test --if-present
+          if [ -f pnpm-lock.yaml ]; then
+            corepack prepare pnpm@latest --activate
+            pnpm install --frozen-lockfile
+            pnpm run build
+            pnpm test --if-present
+          else
+            npm ci
+            npm run build
+            npm test --if-present
+          fi
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -39,7 +50,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Get ECR URI (from CDK stack output)
+      - name: Get ECR URI (from ECR stack outputs)
         id: ecr
         run: |
           REPO_URI=$(aws cloudformation describe-stacks --stack-name ${ENV}-${APP_NAME}-ecr \
@@ -49,9 +60,8 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build & Push Image
+      - name: Build & Push Image (root Dockerfile)
         id: img
-        working-directory: app
         env:
           ECR_URI: ${{ steps.ecr.outputs.uri }}
         run: |
@@ -60,12 +70,10 @@ jobs:
           docker push $ECR_URI:$TAG
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Install CDK (for service deploy)
-        working-directory: cdk
+      - name: Install CDK (service deploy)
         run: npm ci
 
-      - name: Deploy Service stack with new imageTag
-        working-directory: cdk
+      - name: CDK deploy service stack with new imageTag
         env:
           TAG: ${{ steps.img.outputs.tag }}
         run: |
