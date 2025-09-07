@@ -90,9 +90,12 @@ jobs:
           fi
 
       - name: CDK synth (early fail if invalid)
-        run:
-          npx cdk synth -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION} \
-          -a "npx ts-node --transpile-only bin/app.ts"
+        run: |
+          npx cdk synth \
+            -a "npx ts-node --transpile-only bin/app.ts" \
+            -c env=${ENV} \
+            -c appName=${APP_NAME} \
+            -c region=${AWS_REGION}
 
       - name: Deploy Network
         run: |
