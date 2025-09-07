@@ -48,24 +48,6 @@ class OrderTransactionRepository extends BaseRepository<OrderTransaction> {
   }
 
   /**
-   * Retrieves all transactions associated with a specific order by order number.
-   * @param orderNumber - The order number of the Order.
-   * @returns Array of Transaction entities associated with the Order.
-   */
-  async getTransactionsByOrderNumber(
-    orderNumber: string
-  ): Promise<Transaction[]> {
-    const orderTransactions = await this.repository
-      .createQueryBuilder('orderTransaction')
-      .innerJoinAndSelect('orderTransaction.transaction', 'transaction')
-      .innerJoin('orderTransaction.order', 'order')
-      .where('order.orderNumber = :orderNumber', { orderNumber })
-      .getMany();
-
-    return orderTransactions.map((ot) => ot.transaction);
-  }
-
-  /**
    * Retrieves all orders associated with a specific transaction by transaction ID.
    * @param transactionId - The ID of the Transaction.
    * @returns Array of Order entities associated with the Transaction.
