@@ -1,23 +1,18 @@
 name: Deploy App (CDK)
 
 on:
-  workflow_dispatch: {} # manual runs
+  workflow_dispatch: {}
   push:
-    branches: ['main'] # add 'develop', 'release/*', etc. if needed
+    branches: ['main']
     # During bring-up, avoid ignoring .github/** or this file won't trigger
     # paths-ignore:
     #   - 'docs/**'
     #   - 'README.md'
 
 env:
-  ENV: 'dev' # change per-branch or GitHub environments
+  ENV: 'dev' # change per-branch or via environments
   APP_NAME: 'core-apis'
   AWS_REGION: 'eu-west-1'
-
-# Prevent overlapping deploys per env/app
-concurrency:
-  group: deploy-${{ env.ENV }}-${{ env.APP_NAME }}
-  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -25,6 +20,12 @@ jobs:
     permissions:
       id-token: write # required for OIDC
       contents: read
+
+    # ✅ move concurrency to the job so `env.*` is available
+    concurrency:
+      group: deploy-${{ github.ref }}-${{ github.sha }}
+      cancel-in-progress: false
+
     steps:
       - uses: actions/checkout@v4
 
@@ -125,7 +126,8 @@ jobs:
             else
               echo "::notice::$STACK not found; deploying…"
               npx cdk deploy --require-approval never "$STACK" \
-                -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION}
+                -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION} \
+                -a "npx ts-node --transpile-only bin/app.ts"
             fi
           done
       # --- end self-heal ---
@@ -157,10 +159,9 @@ jobs:
         run: |
           npx cdk deploy --require-approval never \
             "${ENV}-${APP_NAME}-svc" \
-            -c env=${ENV} \
-            -c appName=${APP_NAME} \
-            -c region=${AWS_REGION} \
-            -c imageTag=${TAG}
+            -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION} \
+            -c imageTag=${TAG} \
+            -a "npx ts-node --transpile-only bin/app.ts"
 
       - name: Fetch ALB DNS (summary)
         id: alb
