@@ -1,5 +1,4 @@
 import { DeepPartial } from 'typeorm';
-import { ServiceLocation } from '../../entities/locations/locationEntity';
 import { ServiceProvider } from '../../entities/services/serviceProviderEntity';
 import BaseRepository from '../baseRepository';
 
@@ -44,20 +43,6 @@ class ServiceProviderRepository extends BaseRepository<ServiceProvider> {
   async updateRatingByUserId(userId: string, rating: number): Promise<void> {
     const provider = await this.ensureProviderExistsByUserId(userId);
     await this.update(provider.id, { rating });
-  }
-
-  /**
-   * Adds a service location to a ServiceProvider.
-   * @param userId - The ID of the associated UserEntity.
-   * @param location - The ServiceLocation entity to add.
-   */
-  async addLocationToProvider(
-    userId: string,
-    location: ServiceLocation
-  ): Promise<void> {
-    const provider = await this.ensureProviderExistsByUserId(userId);
-    provider.serviceLocations.push(location);
-    await this.save(provider);
   }
 
   /**

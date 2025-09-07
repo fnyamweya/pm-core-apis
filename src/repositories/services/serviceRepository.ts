@@ -1,5 +1,4 @@
 import { DeepPartial } from 'typeorm';
-import { ServiceLocation } from '../../entities/locations/locationEntity';
 import { Service } from '../../entities/services/serviceEntity';
 import BaseRepository from '../baseRepository';
 
@@ -98,20 +97,6 @@ class ServiceRepository extends BaseRepository<Service> {
         `Error retrieving Services for location ID: ${locationId}`
       );
     }
-  }
-
-  /**
-   * Adds a location to a Service by service code.
-   * @param code - The code of the Service.
-   * @param location - The ServiceLocation entity to add.
-   */
-  async addLocationToService(
-    code: string,
-    location: ServiceLocation
-  ): Promise<void> {
-    const service = await this.ensureServiceExistsByCode(code);
-    service.locations.push(location);
-    await this.save(service);
   }
 
   /**

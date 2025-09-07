@@ -64,21 +64,6 @@ class OrderRepository extends BaseRepository<Order> {
     return await this.findOne({ where: { orderNumber } });
   }
 
-  /**
-   * Finds all Orders for a specific user.
-   * @param userId - The ID of the user.
-   * @returns Array of Order entities associated with the user.
-   */
-  async getOrdersByUserId(userId: string): Promise<Order[]> {
-    try {
-      return await this.find({
-        where: { userOrders: { user: { id: userId } } }, // Nested relation path
-        relations: ['userOrders'],
-      });
-    } catch (error) {
-      this.handleError(error, `Error finding Orders for user ID: ${userId}`);
-    }
-  }
 
   /**
    * Updates the status of an Order by its order number.

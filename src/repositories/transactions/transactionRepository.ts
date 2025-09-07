@@ -63,28 +63,6 @@ class TransactionRepository extends BaseRepository<Transaction> {
   }
 
   /**
-   * Finds all Transactions for a specific user.
-   * @param userId - The ID of the user.
-   * @returns Array of Transaction entities associated with the user.
-   */
-  async getTransactionsByUserId(userId: string): Promise<Transaction[]> {
-    return this.find({ where: { user: { id: userId } } });
-  }
-
-  /**
-   * Finds all Transactions for a specific organization.
-   * @param organizationId - The ID of the organization.
-   * @returns Array of Transaction entities associated with the organization.
-   */
-  async getTransactionsByOrganizationId(
-    organizationId: string
-  ): Promise<Transaction[]> {
-    return this.find({
-      where: { organization: { id: organizationId } },
-    });
-  }
-
-  /**
    * Finds all Transactions by a specific status.
    * @param status - The status of the transactions (e.g., PENDING, COMPLETED).
    * @returns Array of Transaction entities with the specified status.
