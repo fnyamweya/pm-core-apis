@@ -1,16 +1,17 @@
 name: Deploy App (CDK)
 
 on:
+  workflow_dispatch: {} # <-- lets you run it manually from Actions
   push:
-    branches: ['main']
-    paths-ignore:
-      - 'infra/**' # your local infra scripts
-      - 'docs/**'
-      - '.github/**'
-      - 'README.md'
+    branches: ['main'] # add 'develop', etc. if you need
+    # During bring-up, DO NOT ignore .github/**, otherwise edits to this file won't trigger
+    # paths-ignore:
+    #   - 'infra/**'
+    #   - 'docs/**'
+    #   - 'README.md'
 
 env:
-  ENV: 'dev' # change per-branch or use environments
+  ENV: 'dev' # change per-branch or via environments
   APP_NAME: 'core-apis'
   AWS_REGION: 'eu-west-1'
 
@@ -18,7 +19,7 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write # needed for OIDC
       contents: read
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +28,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm' # uses package-lock.json; harmless if pnpm is used below
 
       - name: Enable corepack (pnpm) if present
         run: corepack enable
@@ -55,6 +57,10 @@ jobs:
         run: |
           REPO_URI=$(aws cloudformation describe-stacks --stack-name ${ENV}-${APP_NAME}-ecr \
             --query "Stacks[0].Outputs[?OutputKey=='EcrRepoUri'].OutputValue" --output text)
+          if [ -z "$REPO_URI" ] || [ "$REPO_URI" = "None" ]; then
+            echo "ECR repo output not found. Did you run the Infra (CDK) workflow for ${ENV}-${APP_NAME}-ecr?"
+            exit 1
+          fi
           echo "uri=$REPO_URI" >> $GITHUB_OUTPUT
 
       - name: Login to ECR
@@ -70,7 +76,7 @@ jobs:
           docker push $ECR_URI:$TAG
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
-      - name: Install CDK (service deploy)
+      - name: Install CDK deps (service deploy)
         run: npm ci
 
       - name: CDK deploy service stack with new imageTag

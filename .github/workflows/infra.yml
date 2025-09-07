@@ -20,26 +20,40 @@ on:
         required: false
         default: 'false'
 
+env:
+  ENV: ${{ inputs.env }}
+  APP_NAME: ${{ inputs.app_name }}
+  AWS_REGION: ${{ inputs.region }}
+  CREATE_OIDC: ${{ inputs.create_oidc }}
+
+concurrency:
+  group: infra-${{ github.workflow }}-${{ inputs.env }}-${{ inputs.app_name }}
+  cancel-in-progress: false
+
 jobs:
   cdk:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
-    env:
-      ENV: ${{ inputs.env }}
-      APP_NAME: ${{ inputs.app_name }}
-      AWS_REGION: ${{ inputs.region }}
-      CREATE_OIDC: ${{ inputs.create_oidc }}
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Preflight – ensure AWS_DEPLOY_ROLE_ARN is set
+        run: |
+          if [ -z "${{ secrets.AWS_DEPLOY_ROLE_ARN }}" ]; then
+            echo "::error::Missing repo secret AWS_DEPLOY_ROLE_ARN (IAM role ARN for OIDC)."
+            exit 1
+          fi
+
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
 
-      - name: Install CDK deps
+      - name: Install deps (CDK + project)
         run: npm ci
 
       - name: Configure AWS (OIDC)
@@ -48,10 +62,25 @@ jobs:
           role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: CDK Bootstrap (first time per account/region)
+      - name: Resolve Account ID
+        id: acct
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)
-          npx cdk bootstrap aws://$ACCOUNT_ID/${AWS_REGION}
+          echo "account_id=$ACCOUNT_ID" >> $GITHUB_OUTPUT
+
+      - name: Ensure CDK is bootstrapped (idempotent)
+        run: |
+          set -euo pipefail
+          if aws cloudformation describe-stacks --stack-name CDKToolkit --region "${AWS_REGION}" >/dev/null 2>&1; then
+            echo "CDK already bootstrapped in ${AWS_REGION}"
+          else
+            echo "Bootstrapping CDK in ${AWS_REGION}…"
+            npx cdk bootstrap aws://${{ steps.acct.outputs.account_id }}/${AWS_REGION} \
+              --require-approval never
+          fi
+
+      - name: CDK synth (early fail if invalid)
+        run: npx cdk synth -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION}
 
       - name: Deploy Network
         run: |
@@ -65,7 +94,7 @@ jobs:
             "${ENV}-${APP_NAME}-ecr" \
             -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION}
 
-      - name: Deploy Service (initial, imageTag=latest)
+      - name: Deploy Service (initial; imageTag=latest)
         run: |
           npx cdk deploy --require-approval never \
             "${ENV}-${APP_NAME}-svc" \
@@ -81,3 +110,28 @@ jobs:
             -c createOidc=true \
             -c githubOrg=${{ github.repository_owner }} \
             -c githubRepo=${{ github.event.repository.name }}
+
+      - name: Collect outputs
+        id: outs
+        run: |
+          set -euo pipefail
+          ECR_URI=$(aws cloudformation describe-stacks --stack-name "${ENV}-${APP_NAME}-ecr" \
+            --query "Stacks[0].Outputs[?OutputKey=='EcrRepoUri'].OutputValue" --output text)
+          ALB_DNS=$(aws cloudformation describe-stacks --stack-name "${ENV}-${APP_NAME}-svc" \
+            --query "Stacks[0].Outputs[?OutputKey=='LoadBalancerDNS'].OutputValue" --output text || true)
+          echo "ecr_uri=$ECR_URI" >> $GITHUB_OUTPUT
+          echo "alb_dns=$ALB_DNS" >> $GITHUB_OUTPUT
+
+      - name: Summary
+        run: |
+          {
+            echo "### Infra deployed ✅"
+            echo ""
+            echo "- **Env**: ${ENV}"
+            echo "- **App**: ${APP_NAME}"
+            echo "- **Region**: ${AWS_REGION}"
+            echo "- **ECR Repo URI**: \`${{ steps.outs.outputs.ecr_uri }}\`"
+            if [ -n "${{ steps.outs.outputs.alb_dns }}" ] && [ "${{ steps.outs.outputs.alb_dns }}" != "None" ]; then
+              echo "- **ALB DNS**: http://${{ steps.outs.outputs.alb_dns }}"
+            fi
+          } >> $GITHUB_STEP_SUMMARY
