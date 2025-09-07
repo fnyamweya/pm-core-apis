@@ -1,0 +1,77 @@
+name: Deploy App (CDK)
+
+on:
+  push:
+    branches: ['main']
+    paths-ignore:
+      - 'cdk/**'
+      - '.github/**'
+      - 'README.md'
+
+env:
+  ENV: 'dev'
+  AWS_REGION: 'eu-west-1'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node (for tests/build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install + Build + Test
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+          npm test --if-present
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get ECR URI (from CDK stack output)
+        id: ecr
+        run: |
+          REPO_URI=$(aws cloudformation describe-stacks --stack-name ${ENV}-${APP_NAME}-ecr \
+            --query "Stacks[0].Outputs[?OutputKey=='EcrRepoUri'].OutputValue" --output text)
+          echo "uri=$REPO_URI" >> $GITHUB_OUTPUT
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push Image
+        id: img
+        working-directory: app
+        env:
+          ECR_URI: ${{ steps.ecr.outputs.uri }}
+        run: |
+          TAG=${GITHUB_SHA::7}
+          docker build -t $ECR_URI:$TAG .
+          docker push $ECR_URI:$TAG
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Install CDK (for service deploy)
+        working-directory: cdk
+        run: npm ci
+
+      - name: Deploy Service stack with new imageTag
+        working-directory: cdk
+        env:
+          TAG: ${{ steps.img.outputs.tag }}
+        run: |
+          npx cdk deploy --require-approval never \
+            "${ENV}-${APP_NAME}-svc" \
+            -c env=${ENV} \
+            -c appName=${APP_NAME} \
+            -c region=${AWS_REGION} \
+            -c imageTag=${TAG}

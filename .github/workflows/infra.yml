@@ -1,0 +1,91 @@
+name: Infra (CDK)
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 'Environment (e.g., dev, stg, prod)'
+        required: true
+        default: 'dev'
+      app_name:
+        description: 'Property MS APIs'
+        required: true
+        default: 'backend'
+      region:
+        description: 'AWS region'
+        required: true
+        default: 'eu-west-1'
+      create_oidc:
+        description: 'Also create GitHub OIDC role stack? (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  cdk:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      ENV: ${{ inputs.env }}
+      APP_NAME: ${{ inputs.app_name }}
+      AWS_REGION: ${{ inputs.region }}
+      CREATE_OIDC: ${{ inputs.create_oidc }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install CDK deps
+        working-directory: cdk
+        run: npm ci
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # If this is the first time in an account/region, keep this step.
+      - name: CDK Bootstrap (first time per account/region)
+        working-directory: cdk
+        env:
+          AWS_ACCOUNT_ID: ${{ github.repository_owner_id }} # or hardcode your account id
+        run: npx cdk bootstrap aws://$AWS_ACCOUNT_ID/$AWS_REGION
+
+      - name: Deploy Network
+        working-directory: cdk
+        run: |
+          npx cdk deploy --require-approval never \
+            "${ENV}-${APP_NAME}-network" \
+            -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION}
+
+      - name: Deploy ECR
+        working-directory: cdk
+        run: |
+          npx cdk deploy --require-approval never \
+            "${ENV}-${APP_NAME}-ecr" \
+            -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION}
+
+      - name: Deploy Service (initial)
+        working-directory: cdk
+        run: |
+          # First deploy uses imageTag=latest (or any seed tag you want)
+          npx cdk deploy --require-approval never \
+            "${ENV}-${APP_NAME}-svc" \
+            -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION} \
+            -c imageTag=latest
+
+      - name: (Optional) Create OIDC role stack
+        if: ${{ env.CREATE_OIDC == 'true' }}
+        working-directory: cdk
+        run: |
+          npx cdk deploy --require-approval never \
+            "${ENV}-${APP_NAME}-gh-oidc" \
+            -c env=${ENV} -c appName=${APP_NAME} -c region=${AWS_REGION} \
+            -c createOidc=true \
+            -c githubOrg=${{ github.repository_owner }} \
+            -c githubRepo=${{ github.event.repository.name }}

@@ -1,0 +1,20 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: organization_user_roles
+  rules:
+    - actions: ['*']
+      effect: EFFECT_ALLOW
+      roles:
+        - SUPERADMIN
+    - actions: ['update']
+      effect: EFFECT_ALLOW
+      roles:
+        - ADMIN
+    - actions: ['view']
+      effect: EFFECT_ALLOW
+      roles:
+        - USER
+      condition:
+        match:
+          expr: 'request.resource.attr.owner == request.principal.id'

@@ -1,0 +1,63 @@
+# Node modules
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json
+yarn.lock
+
+# TypeScript
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+logs/*.log
+logs/**/*.log
+
+# dotenv environment variables
+# .env
+.env.local
+.env.*.local
+
+# Database configuration & local database files
+*.pgdata
+*.sqlite
+*.db
+*.db-journal
+
+# TypeORM migration and cache files
+typeorm/*-Migration.ts
+
+# Docker-related files
+docker-compose.override.yml
+docker-compose.local.yml
+.env.docker
+tmp/
+*.bak
+
+# Coverage files
+coverage/
+*.lcov
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+.vscode/
+*.sublime*
+
+# Mac OS specific
+.DS_Store
+._*
+
+# Windows specific
+*.lnk
+
+# Build artifacts
+*.out
+*.exe
+*.app

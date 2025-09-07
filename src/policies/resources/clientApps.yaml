@@ -1,0 +1,35 @@
+resource: 'clientApp'
+version: '1.0.0'
+metadata:
+  createdBy: 'system'
+  createdAt: '2023-10-01T12:00:00Z'
+  description: 'ClientApp resource policies'
+policies:
+  - action: 'create'
+    effect: 'ALLOW'
+    priority: 1
+    conditions:
+      - attribute: 'role'
+        operator: 'equals'
+        value: 'admin'
+  - action: 'read'
+    effect: 'ALLOW'
+    priority: 1
+    conditions:
+      - attribute: 'role'
+        operator: 'equals'
+        value: 'user'
+  - action: 'update'
+    effect: 'ALLOW'
+    priority: 1
+    conditions:
+      - attribute: 'role'
+        operator: 'equals'
+        value: 'admin'
+  - action: 'delete'
+    effect: 'ALLOW'
+    priority: 1
+    conditions:
+      - attribute: 'role'
+        operator: 'equals'
+        value: 'admin'

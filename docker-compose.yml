@@ -1,0 +1,223 @@
+services:
+  # Main Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    restart: unless-stopped
+    ports:
+      - '8080:8080'
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+      - cerbos
+    volumes:
+      - .:/app
+    networks:
+      - kleanwave
+
+  postgres:
+    image: postgis/postgis:latest
+    restart: always
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-postgis.sh:/docker-entrypoint-initdb.d/init-postgis.sh
+    ports:
+      - '5432:5432'
+    networks:
+      - kleanwave
+    healthcheck:
+      test:
+        [
+          'CMD',
+          "pg_isready -U ${DB_USER} && psql -U ${DB_USER} -d ${DB_NAME} -c 'SELECT 1 FROM pg_extension WHERE extname = ''postgis'''",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Cerbos Authorization Service
+  cerbos:
+    image: ghcr.io/cerbos/cerbos:latest
+    ports:
+      - '3592:3592'
+    restart: unless-stopped
+    volumes:
+      - ./cerbos:/cerbos-service
+    command: server --config=/cerbos-service/config.yaml
+    depends_on:
+      - redis
+    networks:
+      - kleanwave
+
+  # Database Migration Service
+  migration:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    restart: 'no'
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+    volumes:
+      - .:/app
+    entrypoint: ['ts-node', 'src/scripts/migrationRunner.ts']
+    networks:
+      - kleanwave
+
+  # Redis for Caching
+  redis:
+    image: redis:7.2.4-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 30s
+      timeout: 30s
+      retries: 3
+    command: redis-server /usr/local/etc/redis/redis.conf --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+      - ./redis.conf:/usr/local/etc/redis/redis.conf
+    ports:
+      - '6379:6379'
+    networks:
+      - kleanwave
+
+  # RedisInsight for Redis Management
+  redisinsight:
+    image: redis/redisinsight:latest
+    restart: unless-stopped
+    ports:
+      - '5540:5540'
+    volumes:
+      - redisinsight_data:/data
+    depends_on:
+      - redis
+    networks:
+      - kleanwave
+
+  # Elasticsearch
+  # elasticsearch:
+  #   image: docker.elastic.co/elasticsearch/elasticsearch:8.16.0
+  #   environment:
+  #     - bootstrap.memory_lock=true
+  #     - discovery.type=single-node
+  #     - ES_JAVA_OPTS=-Xms512m -Xmx512m
+  #     - ELASTIC_PASSWORD=${ES_PASSWORD}
+  #     - xpack.security.enabled=false
+  #   ulimits:
+  #     memlock:
+  #       soft: -1
+  #       hard: -1
+  #   ports:
+  #     - "9200:9200"
+  #   volumes:
+  #     - es_data:/usr/share/elasticsearch/data
+  #   networks:
+  #     - kleanwave
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-s", "-f", "http://localhost:9200/_cluster/health"]
+  #     interval: 10s
+  #     timeout: 10s
+  #     retries: 3
+
+  # Kibana for Elasticsearch Visualization
+  # kibana:
+  #   image: docker.elastic.co/kibana/kibana:8.16.0
+  #   environment:
+  #     ELASTICSEARCH_URL: ${ES_URL}
+  #   ports:
+  #     - "5601:5601"
+  #   depends_on:
+  #     - elasticsearch
+  #   networks:
+  #     - kleanwave
+
+  # Grafana for Monitoring
+  # grafana:
+  #   image: grafana/grafana:latest
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - grafana_data:/var/lib/grafana
+  #   environment:
+  #     - GF_SECURITY_ADMIN_USER=admin
+  #     - GF_SECURITY_ADMIN_PASSWORD=admin
+  #   depends_on:
+  #     - loki
+  #   networks:
+  #     - kleanwave
+  #   healthcheck:
+  #     test:
+  #       ["CMD-SHELL", "wget -q --tries=1 -O- http://localhost:3000/api/health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  # Loki for Centralized Logging
+  # loki:
+  #   image: grafana/loki:latest
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3100:3100"
+  #   volumes:
+  #     - ./infra/loki-local-config.yaml:/etc/loki/config/loki-local-config.yaml
+  #     - loki_data:/loki
+  #   command: -config.file=/etc/loki/config/loki-local-config.yaml
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "wget -q --tries=1 -O- http://localhost:3100/ready"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   networks:
+  #     - kleanwave
+
+  # FluentBit for Log Aggregation
+  # fluentbit:
+  #   image: fluent/fluent-bit:latest
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./infra/fluent-bit/fluent-bit.conf:/fluent-bit/etc/fluent-bit.conf
+  #     - ./infra/fluent-bit/parsers.conf:/fluent-bit/etc/parsers.conf
+  #   command: /fluent-bit/bin/fluent-bit -c /fluent-bit/etc/fluent-bit.conf
+  #   depends_on:
+  #     - loki
+  #   networks:
+  #     - kleanwave
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "wget -q --tries=1 -O- http://loki:3100/ready"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
+
+  # Grafana Image Renderer
+  # renderer:
+  #   image: grafana/grafana-image-renderer:latest
+  #   ports:
+  #     - "8081:8081"
+  #   environment:
+  #     ENABLE_METRICS: true
+  #   networks:
+  #     - kleanwave
+
+networks:
+  kleanwave:
+    driver: bridge
+
+volumes:
+  postgres_data: {}
+  redis_data: {}
+  redisinsight_data: {}
+  # es_data: {}
+  # grafana_data: {}
+  # loki_data: {}

@@ -1,0 +1,30 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: default
+  resource: kyc
+  rules:
+    - actions: ['*']
+      effect: EFFECT_ALLOW
+      roles:
+        - super_admin
+
+    - actions: ['create', 'update', 'delete']
+      effect: EFFECT_ALLOW
+      roles:
+        - admin
+
+    - actions: ['read']
+      effect: EFFECT_ALLOW
+      roles:
+        - user
+        - admin
+
+    - actions: ['create', 'update', 'delete']
+      effect: EFFECT_DENY
+      roles:
+        - user
+
+    - actions: ['read']
+      effect: EFFECT_DENY
+      roles:
+        - user
