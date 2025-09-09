@@ -13,10 +13,10 @@ import {
   aws_rds as rds,
   aws_secretsmanager as secrets,
   aws_ssm as ssm,
-  aws_applicationautoscaling as appscaling,
+  aws_applicationautoscaling as appscaling
 } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-import * as path from 'node:path';
+import { resolve } from 'path';
 
 export interface CoreStackProps extends StackProps {
   appName: string;
@@ -48,8 +48,8 @@ export class CoreStack extends Stack {
       maxAzs: 2,
       subnetConfiguration: [
         { name: 'public', subnetType: ec2.SubnetType.PUBLIC, cidrMask: 24 },
-        { name: 'isolated', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 },
-      ],
+        { name: 'isolated', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 }
+      ]
     });
 
     const albSg = new ec2.SecurityGroup(this, 'AlbSg', { vpc, allowAllOutbound: true });
@@ -59,12 +59,13 @@ export class CoreStack extends Stack {
     dbSg.addIngressRule(serviceSg, ec2.Port.tcp(5432));
 
     const engine = rds.DatabaseInstanceEngine.postgres({
-      version: rds.PostgresEngineVersion.VER_17_5,
+      version: rds.PostgresEngineVersion.VER_16_3
     });
+
     const instanceType = ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MICRO);
 
     const dbCredentials = rds.Credentials.fromGeneratedSecret('postgres', {
-      secretName: `${name}/db-credentials`,
+      secretName: `${name}/db-credentials`
     });
 
     const db = new rds.DatabaseInstance(this, 'Postgres', {
@@ -84,7 +85,7 @@ export class CoreStack extends Stack {
       removalPolicy: isProd ? RemovalPolicy.SNAPSHOT : RemovalPolicy.DESTROY,
       deleteAutomatedBackups: !isProd,
       credentials: dbCredentials,
-      databaseName: 'app',
+      databaseName: 'app'
     });
 
     const secretFields: Record<string, SecretValue> = {};
@@ -96,7 +97,7 @@ export class CoreStack extends Stack {
       Object.keys(secretFields).length > 0
         ? new secrets.Secret(this, 'AppSecrets', {
             secretName: `${name}/app-secrets`,
-            secretObjectValue: secretFields,
+            secretObjectValue: secretFields
           })
         : undefined;
 
@@ -107,25 +108,26 @@ export class CoreStack extends Stack {
         parameterName: `/${name}/config/${k}`,
         stringValue: v,
         type: ssm.ParameterType.SECURE_STRING,
-        tier: ssm.ParameterTier.STANDARD,
+        tier: ssm.ParameterTier.STANDARD
       });
     });
 
     const cluster = new ecs.Cluster(this, 'Cluster', {
       vpc,
       clusterName: `${name}-cluster`,
-      containerInsights: true,
+      containerInsights: true
     });
 
     const logGroup = new logs.LogGroup(this, 'Logs', {
       logGroupName: `/ecs/${props.appName}/${props.envName}`,
-      retention: logs.RetentionDays.ONE_MONTH,
+      retention: logs.RetentionDays.ONE_MONTH
     });
 
     let image: ecs.ContainerImage;
     let repo: ecr.IRepository | undefined;
     if (props.buildFromPath && props.buildFromPath.trim()) {
-      image = ecs.ContainerImage.fromAsset(path.resolve(__dirname, '..', '..', props.buildFromPath));
+      const assetPath = resolve(process.cwd(), props.buildFromPath);
+      image = ecs.ContainerImage.fromAsset(assetPath);
     } else {
       const repoName = props.ecrRepositoryName ?? `${props.appName}-${props.envName}`;
       repo = ecr.Repository.fromRepositoryName(this, 'ImageRepo', repoName);
@@ -146,7 +148,7 @@ export class CoreStack extends Stack {
       capacityProviderStrategies: props.enableFargateSpot
         ? [
             { capacityProvider: 'FARGATE_SPOT', weight: 1 },
-            { capacityProvider: 'FARGATE', weight: 1 },
+            { capacityProvider: 'FARGATE', weight: 1 }
           ]
         : undefined,
       securityGroups: [serviceSg],
@@ -162,7 +164,7 @@ export class CoreStack extends Stack {
           DB_HOST: db.instanceEndpoint.hostname,
           DB_PORT: '5432',
           DB_NAME: 'app',
-          DB_USER: 'postgres',
+          DB_USER: 'postgres'
         },
         secrets: {
           DB_PASSWORD: ecs.Secret.fromSecretsManager(dbCredentials.secret!, 'password'),
@@ -173,9 +175,9 @@ export class CoreStack extends Stack {
             : {}),
           ...Object.fromEntries(
             Object.entries(ssmParams).map(([k, param]) => [k, ecs.Secret.fromSsmParameter(param)])
-          ),
-        },
-      },
+          )
+        }
+      }
     });
 
     svc.loadBalancer.addSecurityGroup(albSg);
@@ -187,7 +189,7 @@ export class CoreStack extends Stack {
       healthyThresholdCount: 2,
       unhealthyThresholdCount: 3,
       interval: Duration.seconds(20),
-      timeout: Duration.seconds(5),
+      timeout: Duration.seconds(5)
     });
 
     if (repo) {
@@ -197,23 +199,23 @@ export class CoreStack extends Stack {
 
     const scaling = svc.service.autoScaleTaskCount({
       minCapacity: props.minCapacity,
-      maxCapacity: props.maxCapacity,
+      maxCapacity: props.maxCapacity
     });
 
     scaling.scaleOnCpuUtilization('CpuScaling', {
-      targetUtilizationPercent: isProd ? 60 : 50,
+      targetUtilizationPercent: isProd ? 60 : 50
     });
 
     if (!isProd) {
       scaling.scaleOnSchedule('NightDown', {
         schedule: appscaling.Schedule.cron({ minute: '0', hour: '20' }),
         minCapacity: 0,
-        maxCapacity: Math.max(0, props.minCapacity),
+        maxCapacity: Math.max(0, props.minCapacity)
       });
       scaling.scaleOnSchedule('MorningUp', {
         schedule: appscaling.Schedule.cron({ minute: '0', hour: '6' }),
         minCapacity: Math.max(1, props.desiredCount),
-        maxCapacity: props.maxCapacity,
+        maxCapacity: props.maxCapacity
       });
     }
 

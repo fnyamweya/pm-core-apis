@@ -16,7 +16,7 @@ const resolveEnv = (): Environment => ({
     process.env.CDK_DEFAULT_REGION ??
     process.env.AWS_REGION ??
     process.env.AWS_DEFAULT_REGION ??
-    undefined,
+    undefined
 });
 
 const app = new App();
@@ -36,32 +36,27 @@ const secretKeys = [
   'AWS_ACCESS_KEY_ID',
   'AWS_SECRET_ACCESS_KEY',
   'REDIS_PASSWORD',
-  'CERBOS_ADMIN_PASSWORD',
+  'CERBOS_ADMIN_PASSWORD'
 ] as const;
 
 const configKeys = [
-  'PORT', 'NODE_ENV', 'LOG_LEVEL', 'URL',
-  'ARGON2_MEMORY_COST', 'ARGON2_TIME_COST', 'ARGON2_PARALLELISM',
-  'CERBOS_HOST', 'CERBOS_PORT', 'CERBOS_TLS', 'CERBOS_PLAYGROUND_INSTANCE', 'CERBOS_ADMIN_USERNAME',
-  'DB_HOST', 'DB_PORT', 'DB_USER', 'DB_NAME',
-  'DB_SYNCHRONIZE', 'DB_LOGGING', 'DB_TYPE',
-  'DB_POOL_MAX', 'DB_POOL_MIN', 'DB_POOL_IDLE_TIMEOUT',
-  'DB_POOL_ACQUIRE_TIMEOUT', 'DB_POOL_REAP_INTERVAL',
-  'DB_POOL_CREATE_TIMEOUT', 'DB_POOL_CREATE_RETRY_INTERVAL',
-  'DB_RETRY_ATTEMPTS', 'DB_RETRY_DELAY',
-  'AWS_REGION',
-  'REDIS_HOST', 'REDIS_PORT',
+  'PORT','NODE_ENV','LOG_LEVEL','URL',
+  'ARGON2_MEMORY_COST','ARGON2_TIME_COST','ARGON2_PARALLELISM',
+  'CERBOS_HOST','CERBOS_PORT','CERBOS_TLS','CERBOS_PLAYGROUND_INSTANCE','CERBOS_ADMIN_USERNAME',
+  'DB_HOST','DB_PORT','DB_USER','DB_NAME',
+  'DB_SYNCHRONIZE','DB_LOGGING','DB_TYPE',
+  'DB_POOL_MAX','DB_POOL_MIN','DB_POOL_IDLE_TIMEOUT',
+  'DB_POOL_ACQUIRE_TIMEOUT','DB_POOL_REAP_INTERVAL',
+  'DB_POOL_CREATE_TIMEOUT','DB_POOL_CREATE_RETRY_INTERVAL',
+  'DB_RETRY_ATTEMPTS','DB_RETRY_DELAY',
+  'AWS_REGION','REDIS_HOST','REDIS_PORT'
 ] as const;
 
 const secretMap: Record<string, string> = {};
-for (const k of secretKeys) {
-  if (process.env[k]) secretMap[k] = process.env[k] as string;
-}
+for (const k of secretKeys) if (process.env[k]) secretMap[k] = process.env[k] as string;
 
 const configMap: Record<string, string> = {};
-for (const k of configKeys) {
-  if (process.env[k]) configMap[k] = process.env[k] as string;
-}
+for (const k of configKeys) if (process.env[k]) configMap[k] = process.env[k] as string;
 
 new CoreStack(app, `${appName}-dev`, {
   env, appName, envName: 'dev',
@@ -70,7 +65,7 @@ new CoreStack(app, `${appName}-dev`, {
   enableFargateSpot: true,
   buildFromPath: buildFromPath ?? '../',
   appSecrets: secretMap,
-  appConfig: configMap,
+  appConfig: configMap
 });
 
 new CoreStack(app, `${appName}-prod`, {
@@ -81,5 +76,5 @@ new CoreStack(app, `${appName}-prod`, {
   ecrRepositoryName: `${appName}-prod`,
   imageTag,
   appSecrets: secretMap,
-  appConfig: configMap,
+  appConfig: configMap
 });
