@@ -12,7 +12,6 @@ import {
   aws_logs as logs,
   aws_rds as rds,
   aws_secretsmanager as secrets,
-  aws_ssm as ssm,
   aws_applicationautoscaling as appscaling
 } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
@@ -58,7 +57,9 @@ export class CoreStack extends Stack {
     const dbSg = new ec2.SecurityGroup(this, 'DbSg', { vpc, allowAllOutbound: false });
     dbSg.addIngressRule(serviceSg, ec2.Port.tcp(5432));
 
-    const engine = rds.DatabaseInstanceEngine.postgres({ version: rds.PostgresEngineVersion.VER_16_3 });
+    const engine = rds.DatabaseInstanceEngine.postgres({
+      version: rds.PostgresEngineVersion.VER_16_3
+    });
     const instanceType = ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MICRO);
 
     const db = new rds.DatabaseInstance(this, 'Postgres', {
@@ -77,7 +78,9 @@ export class CoreStack extends Stack {
       deletionProtection: isProd,
       removalPolicy: isProd ? RemovalPolicy.SNAPSHOT : RemovalPolicy.DESTROY,
       deleteAutomatedBackups: !isProd,
-      credentials: rds.Credentials.fromGeneratedSecret('postgres', { secretName: `${name}/db-credentials` }),
+      credentials: rds.Credentials.fromGeneratedSecret('postgres', {
+        secretName: `${name}/db-credentials`
+      }),
       databaseName: 'app'
     });
 
@@ -93,17 +96,6 @@ export class CoreStack extends Stack {
             secretObjectValue: secretFields
           })
         : undefined;
-
-    const ssmParams: Record<string, ssm.IStringParameter> = {};
-    Object.entries(props.appConfig ?? {}).forEach(([k, v]) => {
-      if (v === undefined) return;
-      ssmParams[k] = new ssm.StringParameter(this, `Cfg_${k}`, {
-        parameterName: `/${name}/config/${k}`,
-        stringValue: v,
-        type: ssm.ParameterType.SECURE_STRING,
-        tier: ssm.ParameterTier.STANDARD
-      });
-    });
 
     const cluster = new ecs.Cluster(this, 'Cluster', {
       vpc,
@@ -143,6 +135,16 @@ export class CoreStack extends Stack {
       image = ecs.ContainerImage.fromEcrRepository(repo, props.imageTag ?? 'latest');
     }
 
+    const baseEnv: Record<string, string> = {
+      NODE_ENV: props.envName,
+      PORT: String(props.containerPort),
+      DB_HOST: db.instanceEndpoint.hostname,
+      DB_PORT: '5432',
+      DB_NAME: 'app',
+      DB_USER: 'postgres'
+    };
+    const mergedEnv = { ...baseEnv, ...(props.appConfig ?? {}) };
+
     const svc = new ecs_patterns.ApplicationLoadBalancedFargateService(this, 'Service', {
       cluster,
       serviceName: `${name}-svc`,
@@ -167,24 +169,14 @@ export class CoreStack extends Stack {
         containerPort: props.containerPort,
         enableLogging: true,
         logDriver: ecs.LogDriver.awsLogs({ logGroup, streamPrefix: props.appName }),
-        environment: {
-          NODE_ENV: props.envName,
-          PORT: String(props.containerPort),
-          DB_HOST: db.instanceEndpoint.hostname,
-          DB_PORT: '5432',
-          DB_NAME: 'app',
-          DB_USER: 'postgres'
-        },
+        environment: mergedEnv,
         secrets: {
           DB_PASSWORD: ecs.Secret.fromSecretsManager(db.secret!, 'password'),
           ...(appSecrets
             ? Object.fromEntries(
-                Object.keys(props.appSecrets ?? {}).map(k => [k, ecs.Secret.fromSecretsManager(appSecrets!, k)])
+                Object.keys(props.appSecrets ?? {}).map((k) => [k, ecs.Secret.fromSecretsManager(appSecrets!, k)])
               )
-            : {}),
-          ...Object.fromEntries(
-            Object.entries(ssmParams).map(([k, param]) => [k, ecs.Secret.fromSsmParameter(param)])
-          )
+            : {})
         }
       }
     });
