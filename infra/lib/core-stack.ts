@@ -167,7 +167,7 @@ export class CoreStack extends Stack {
           DB_USER: 'postgres'
         },
         secrets: {
-          DB_PASSWORD: ecs.Secret.fromSecretsManager(dbCredentials.secret!, 'password'),
+          DB_PASSWORD: ecs.Secret.fromSecretsManager(db.secret!, 'password'),
           ...(appSecrets
             ? Object.fromEntries(
                 Object.keys(props.appSecrets ?? {}).map(k => [k, ecs.Secret.fromSecretsManager(appSecrets!, k)])
