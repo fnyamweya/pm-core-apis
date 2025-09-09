@@ -2,7 +2,7 @@
 import 'source-map-support/register';
 import { App, Environment } from 'aws-cdk-lib';
 import { config as loadEnv } from 'dotenv';
-import { CoreStack } from '../lib/core-stack.js';
+import { CoreStack } from '../lib/core-stack';
 
 loadEnv({ path: process.env.ENV_FILE ?? 'infra/.env.deploy' });
 
