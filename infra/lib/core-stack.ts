@@ -12,7 +12,8 @@ import {
   aws_logs as logs,
   aws_rds as rds,
   aws_secretsmanager as secrets,
-  aws_applicationautoscaling as appscaling
+  aws_applicationautoscaling as appscaling,
+  aws_elasticache as elasticache
 } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { resolve } from 'path';
@@ -135,14 +136,53 @@ export class CoreStack extends Stack {
       image = ecs.ContainerImage.fromEcrRepository(repo, props.imageTag ?? 'latest');
     }
 
+    /**
+     * Optional Redis (ElastiCache) — to prevent localhost attempts in ECS.
+     * Cheapest: single-node cache.t4g.micro, no encryption/auth, isolated subnets.
+     */
+    const redisSg = new ec2.SecurityGroup(this, 'RedisSg', { vpc, allowAllOutbound: true });
+    redisSg.addIngressRule(serviceSg, ec2.Port.tcp(6379));
+
+    const redisSubnets = vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_ISOLATED });
+
+    const redisSubnetGroup = new elasticache.CfnSubnetGroup(this, 'RedisSubnetGroup', {
+      cacheSubnetGroupName: `${name}-redis-subnets`,
+      description: `${name} redis subnets`,
+      subnetIds: redisSubnets.subnetIds
+    });
+
+    const redis = new elasticache.CfnReplicationGroup(this, 'Redis', {
+      engine: 'redis',
+      engineVersion: '7.1',
+      cacheNodeType: 'cache.t4g.micro',
+      replicationGroupDescription: `${name} redis`,
+      numNodeGroups: 1,
+      replicasPerNodeGroup: 0,
+      automaticFailoverEnabled: false,
+      multiAzEnabled: false,
+      cacheSubnetGroupName: redisSubnetGroup.cacheSubnetGroupName!,
+      securityGroupIds: [redisSg.securityGroupId],
+      atRestEncryptionEnabled: false,
+      transitEncryptionEnabled: false
+    });
+    redis.addDependency(redisSubnetGroup);
+
+    const redisHost = redis.attrPrimaryEndPointAddress;
+    const redisPort = redis.attrPrimaryEndPointPort || '6379';
+
     const baseEnv: Record<string, string> = {
       NODE_ENV: props.envName,
       PORT: String(props.containerPort),
       DB_HOST: db.instanceEndpoint.hostname,
       DB_PORT: '5432',
       DB_NAME: 'app',
-      DB_USER: 'postgres'
+      DB_USER: 'postgres',
+      REDIS_ENABLED: 'true',
+      REDIS_HOST: redisHost,
+      REDIS_PORT: redisPort
+      // note: no REDIS_PASSWORD (ElastiCache default is no AUTH)
     };
+
     const mergedEnv = { ...baseEnv, ...(props.appConfig ?? {}) };
 
     const svc = new ecs_patterns.ApplicationLoadBalancedFargateService(this, 'Service', {
@@ -223,6 +263,7 @@ export class CoreStack extends Stack {
     new CfnOutput(this, 'AlbDnsName', { value: svc.loadBalancer.loadBalancerDnsName });
     new CfnOutput(this, 'DbEndpoint', { value: db.instanceEndpoint.socketAddress });
     new CfnOutput(this, 'DbSecretName', { value: db.secret!.secretName });
+    new CfnOutput(this, 'RedisEndpoint', { value: `${redisHost}:${redisPort}` });
     if (appSecrets) new CfnOutput(this, 'AppSecretsName', { value: appSecrets.secretName });
   }
 }
