@@ -24,8 +24,8 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Resolve AWS identity
         id: aws
@@ -35,7 +35,7 @@ jobs:
       - name: Derive environment flags
         id: derive
         run: |
-          APP_NAME="${{ vars.APP_NAME }}"
+          APP_NAME="${{ secrets.APP_NAME }}"
           if [ "${GITHUB_REF_NAME}" = "main" ]; then
             echo "env_name=prod" >> $GITHUB_OUTPUT
             echo "node_env=production" >> $GITHUB_OUTPUT
@@ -54,42 +54,42 @@ jobs:
         run: |
           mkdir -p infra
           cat > infra/.env.deploy <<EOF
-          PORT=${{ vars.PORT || 8080 }}
+          PORT=${{ secrets.PORT || 8080 }}
           NODE_ENV=${{ steps.derive.outputs.node_env }}
           LOG_LEVEL=${{ steps.derive.outputs.log_level }}
 
-          ARGON2_MEMORY_COST=${{ vars.ARGON2_MEMORY_COST || 2048 }}
-          ARGON2_TIME_COST=${{ vars.ARGON2_TIME_COST || 10 }}
-          ARGON2_PARALLELISM=${{ vars.ARGON2_PARALLELISM || 1 }}
+          ARGON2_MEMORY_COST=${{ secrets.ARGON2_MEMORY_COST || 2048 }}
+          ARGON2_TIME_COST=${{ secrets.ARGON2_TIME_COST || 10 }}
+          ARGON2_PARALLELISM=${{ secrets.ARGON2_PARALLELISM || 1 }}
 
-          CERBOS_HOST=${{ vars.CERBOS_HOST || 'cerbos' }}
-          CERBOS_PORT=${{ vars.CERBOS_PORT || 3592 }}
-          CERBOS_TLS=${{ vars.CERBOS_TLS || 'false' }}
-          CERBOS_PLAYGROUND_INSTANCE=${{ vars.CERBOS_PLAYGROUND_INSTANCE || '' }}
-          CERBOS_ADMIN_USERNAME=${{ vars.CERBOS_ADMIN_USERNAME || 'cerbos' }}
+          CERBOS_HOST=${{ secrets.CERBOS_HOST || 'cerbos' }}
+          CERBOS_PORT=${{ secrets.CERBOS_PORT || 3592 }}
+          CERBOS_TLS=${{ secrets.CERBOS_TLS || 'false' }}
+          CERBOS_PLAYGROUND_INSTANCE=${{ secrets.CERBOS_PLAYGROUND_INSTANCE || '' }}
+          CERBOS_ADMIN_USERNAME=${{ secrets.CERBOS_ADMIN_USERNAME || 'cerbos' }}
 
-          AWS_REGION=${{ vars.AWS_REGION }}
-          URL=${{ vars.URL || (github.ref_name == 'main' && 'https://api.example.com' || 'http://localhost:3000') }}
+          AWS_REGION=${{ secrets.AWS_REGION }}
+          URL=${{ secrets.URL || (github.ref_name == 'main' && 'https://api.example.com' || 'http://localhost:3000') }}
 
-          REDIS_HOST=${{ vars.REDIS_HOST || 'redis' }}
-          REDIS_PORT=${{ vars.REDIS_PORT || 6379 }}
+          REDIS_HOST=${{ secrets.REDIS_HOST || 'redis' }}
+          REDIS_PORT=${{ secrets.REDIS_PORT || 6379 }}
 
-          DB_HOST=${{ vars.DB_HOST || 'postgres' }}
-          DB_PORT=${{ vars.DB_PORT || 5432 }}
-          DB_USER=${{ vars.DB_USER || 'postgres' }}
-          DB_NAME=${{ vars.DB_NAME || 'app' }}
-          DB_SYNCHRONIZE=${{ vars.DB_SYNCHRONIZE || 'false' }}
-          DB_LOGGING=${{ vars.DB_LOGGING || 'false' }}
+          DB_HOST=${{ secrets.DB_HOST || 'postgres' }}
+          DB_PORT=${{ secrets.DB_PORT || 5432 }}
+          DB_USER=${{ secrets.DB_USER || 'postgres' }}
+          DB_NAME=${{ secrets.DB_NAME || 'app' }}
+          DB_SYNCHRONIZE=${{ secrets.DB_SYNCHRONIZE || 'false' }}
+          DB_LOGGING=${{ secrets.DB_LOGGING || 'false' }}
           DB_TYPE=postgres
-          DB_POOL_MAX=${{ vars.DB_POOL_MAX || (github.ref_name == 'main' && 50 || 20) }}
-          DB_POOL_MIN=${{ vars.DB_POOL_MIN || (github.ref_name == 'main' && 2 || 1) }}
-          DB_POOL_IDLE_TIMEOUT=${{ vars.DB_POOL_IDLE_TIMEOUT || 30000 }}
-          DB_POOL_ACQUIRE_TIMEOUT=${{ vars.DB_POOL_ACQUIRE_TIMEOUT || 60000 }}
-          DB_POOL_REAP_INTERVAL=${{ vars.DB_POOL_REAP_INTERVAL || 1000 }}
-          DB_POOL_CREATE_TIMEOUT=${{ vars.DB_POOL_CREATE_TIMEOUT || 30000 }}
-          DB_POOL_CREATE_RETRY_INTERVAL=${{ vars.DB_POOL_CREATE_RETRY_INTERVAL || 200 }}
-          DB_RETRY_ATTEMPTS=${{ vars.DB_RETRY_ATTEMPTS || 5 }}
-          DB_RETRY_DELAY=${{ vars.DB_RETRY_DELAY || 3000 }}
+          DB_POOL_MAX=${{ secrets.DB_POOL_MAX || (github.ref_name == 'main' && 50 || 20) }}
+          DB_POOL_MIN=${{ secrets.DB_POOL_MIN || (github.ref_name == 'main' && 2 || 1) }}
+          DB_POOL_IDLE_TIMEOUT=${{ secrets.DB_POOL_IDLE_TIMEOUT || 30000 }}
+          DB_POOL_ACQUIRE_TIMEOUT=${{ secrets.DB_POOL_ACQUIRE_TIMEOUT || 60000 }}
+          DB_POOL_REAP_INTERVAL=${{ secrets.DB_POOL_REAP_INTERVAL || 1000 }}
+          DB_POOL_CREATE_TIMEOUT=${{ secrets.DB_POOL_CREATE_TIMEOUT || 30000 }}
+          DB_POOL_CREATE_RETRY_INTERVAL=${{ secrets.DB_POOL_CREATE_RETRY_INTERVAL || 200 }}
+          DB_RETRY_ATTEMPTS=${{ secrets.DB_RETRY_ATTEMPTS || 5 }}
+          DB_RETRY_DELAY=${{ secrets.DB_RETRY_DELAY || 3000 }}
           EOF
           echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> infra/.env.deploy
           echo "JWT_REFRESH_SECRET=${{ secrets.JWT_REFRESH_SECRET }}" >> infra/.env.deploy
@@ -107,7 +107,7 @@ jobs:
         working-directory: infra
         env:
           ACCOUNT_ID: ${{ steps.aws.outputs.account_id }}
-        run: pnpm dlx cdk bootstrap aws://$ACCOUNT_ID/${{ vars.AWS_REGION }}
+        run: pnpm dlx cdk bootstrap aws://$ACCOUNT_ID/${{ secrets.AWS_REGION }}
 
       - name: Ensure ECR (prod only)
         if: ${{ steps.derive.outputs.env_name == 'prod' }}
@@ -124,7 +124,7 @@ jobs:
         env:
           ACCOUNT_ID: ${{ steps.aws.outputs.account_id }}
         run: |
-          REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com"
+          REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com"
           IMAGE_TAG="${{ github.sha }}"
           docker build -t $REGISTRY/${{ steps.derive.outputs.ecr_repo }}:$IMAGE_TAG .
           docker push $REGISTRY/${{ steps.derive.outputs.ecr_repo }}:$IMAGE_TAG
