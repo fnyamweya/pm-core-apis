@@ -58,15 +58,8 @@ export class CoreStack extends Stack {
     const dbSg = new ec2.SecurityGroup(this, 'DbSg', { vpc, allowAllOutbound: false });
     dbSg.addIngressRule(serviceSg, ec2.Port.tcp(5432));
 
-    const engine = rds.DatabaseInstanceEngine.postgres({
-      version: rds.PostgresEngineVersion.VER_16_3
-    });
-
+    const engine = rds.DatabaseInstanceEngine.postgres({ version: rds.PostgresEngineVersion.VER_16_3 });
     const instanceType = ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MICRO);
-
-    const dbCredentials = rds.Credentials.fromGeneratedSecret('postgres', {
-      secretName: `${name}/db-credentials`
-    });
 
     const db = new rds.DatabaseInstance(this, 'Postgres', {
       vpc,
@@ -84,7 +77,7 @@ export class CoreStack extends Stack {
       deletionProtection: isProd,
       removalPolicy: isProd ? RemovalPolicy.SNAPSHOT : RemovalPolicy.DESTROY,
       deleteAutomatedBackups: !isProd,
-      credentials: dbCredentials,
+      credentials: rds.Credentials.fromGeneratedSecret('postgres', { secretName: `${name}/db-credentials` }),
       databaseName: 'app'
     });
 
@@ -125,9 +118,25 @@ export class CoreStack extends Stack {
 
     let image: ecs.ContainerImage;
     let repo: ecr.IRepository | undefined;
+
     if (props.buildFromPath && props.buildFromPath.trim()) {
       const assetPath = resolve(process.cwd(), props.buildFromPath);
-      image = ecs.ContainerImage.fromAsset(assetPath);
+      image = ecs.ContainerImage.fromAsset(assetPath, {
+        file: 'Dockerfile',
+        exclude: [
+          'infra',
+          'infra/**',
+          'cdk.out',
+          '**/cdk.out/**',
+          '.git',
+          '.github',
+          'node_modules',
+          '**/node_modules/**',
+          '*.md',
+          'README*',
+          'LICENSE*'
+        ]
+      });
     } else {
       const repoName = props.ecrRepositoryName ?? `${props.appName}-${props.envName}`;
       repo = ecr.Repository.fromRepositoryName(this, 'ImageRepo', repoName);
@@ -221,7 +230,7 @@ export class CoreStack extends Stack {
 
     new CfnOutput(this, 'AlbDnsName', { value: svc.loadBalancer.loadBalancerDnsName });
     new CfnOutput(this, 'DbEndpoint', { value: db.instanceEndpoint.socketAddress });
-    new CfnOutput(this, 'DbSecretName', { value: dbCredentials.secret!.secretName });
+    new CfnOutput(this, 'DbSecretName', { value: db.secret!.secretName });
     if (appSecrets) new CfnOutput(this, 'AppSecretsName', { value: appSecrets.secretName });
   }
 }
