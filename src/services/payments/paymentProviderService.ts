@@ -83,16 +83,16 @@ class PaymentProviderService extends BaseService<PaymentProvider> {
       );
 
       return provider;
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error('Error creating PaymentProvider', { data, error });
 
-      if (
-        error instanceof Error &&
-        error.message.includes('unique constraint')
-      ) {
-        throw new ConflictError(
-          'PaymentProvider with this code already exists'
-        );
+      const pgCode = error?.details?.originalError?.code || error?.code;
+      if (pgCode === '23505') {
+        throw new ConflictError('PaymentProvider with this code already exists');
+      }
+      // best effort: inspect message
+      if (error instanceof Error && /unique/i.test(error.message)) {
+        throw new ConflictError('PaymentProvider with this code already exists');
       }
 
       throw new Error('Unable to create payment provider');

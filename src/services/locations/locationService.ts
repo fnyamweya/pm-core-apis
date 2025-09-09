@@ -23,7 +23,7 @@ export interface AddressComponentLinkInput {
   label?: string | null;
   sequence?: number | null;
   isPrimary?: boolean | null;
-  centerPoint?: Point | null; // service accepts null to mean "unset" but converts to undefined for writes
+  centerPoint?: Point | null;
   metadata?: Record<string, any> | null;
 }
 

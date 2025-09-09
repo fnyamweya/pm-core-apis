@@ -37,15 +37,8 @@ if (env.NODE_ENV === 'development') {
   app.use(morganMiddleware);
 }
 
-// Capture raw body for webhook HMAC verification
-function rawBodySaver(req: any, _res: any, buf: Buffer) {
-  if (buf && buf.length) {
-    req.rawBody = buf.toString('utf8');
-  }
-}
-
 // Body parser, reading data from body into req.body
-app.use(express.json({ limit: '10kb', verify: rawBodySaver as any }));
+app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 
 // Compress all routes
@@ -57,31 +50,8 @@ app.use(i18nMiddleware);
 // Serving static files
 app.use(express.static(path.join(__dirname, '../public')));
 
-const ALLOWED_ORIGINS = [
-  "https://stalwart-treacle-01dd59.netlify.app",
-  "http://localhost:5173",
-];
-
-const corsOptions: cors.CorsOptions = {
-  origin(origin, cb) {
-    if (!origin) return cb(null, true);
-    return cb(null, ALLOWED_ORIGINS.includes(origin));
-  },
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "X-Requested-With",
-    "X-CSRF-Token",
-  ],
-  exposedHeaders: ["Content-Length"],
-};
-
 // Enable CORS with specified origin
-app.use(cors(corsOptions));
-// Enable pre-flight across-the-board
-app.options('*', cors(corsOptions));
+app.use(cors());
 
 app.use(CorrelationIdUtil.correlationIdMiddleware());
 

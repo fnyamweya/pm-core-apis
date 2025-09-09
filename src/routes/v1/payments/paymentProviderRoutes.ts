@@ -2,6 +2,8 @@ import { Router } from 'express';
 import PaymentProviderController from '../../../controllers/payments/paymentProviderController';
 import authenticate from '../../../middlewares/auth/authenticate';
 import asyncHandler from '../../../middlewares/common/asyncHandler';
+import validate from '../../../middlewares/common/validate';
+import { createPaymentProviderSchema, updatePaymentProviderSchema } from '../../../validations/payments/paymentProviderValidation';
 
 const router = Router();
 
@@ -13,6 +15,7 @@ const router = Router();
 router.post(
   '/',
   authenticate('access'),
+  validate(createPaymentProviderSchema),
   asyncHandler(
     PaymentProviderController.createPaymentProvider.bind(
       PaymentProviderController
@@ -58,6 +61,7 @@ router.get(
 router.put(
   '/:code',
   authenticate('access'),
+  validate(updatePaymentProviderSchema),
   asyncHandler(
     PaymentProviderController.updatePaymentProviderByCode.bind(
       PaymentProviderController

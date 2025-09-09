@@ -2,7 +2,6 @@ import { NextFunction, Request, Response } from 'express';
 import httpStatus from 'http-status-codes';
 import ALLOWED_KINDS from '../../constants/allowedKinds';
 import { PaymentProvider } from '../../entities/payments/paymentProviderEntity';
-import validate from '../../middlewares/common/validate';
 import paymentProviderService from '../../services/payments/paymentProviderService';
 import { logger } from '../../utils/logger';
 import {
@@ -48,9 +47,6 @@ class PaymentProviderController extends BaseController<PaymentProvider> {
     });
 
     try {
-      // Validate request payload
-      await validate(createPaymentProviderSchema)(req, res, next);
-
       const provider = await paymentProviderService.createPaymentProvider(
         req.body
       );
@@ -132,9 +128,6 @@ class PaymentProviderController extends BaseController<PaymentProvider> {
     }
 
     try {
-      // Validate request payload
-      await validate(updatePaymentProviderSchema)(req, res, next);
-
       const updatedProvider =
         await paymentProviderService.updatePaymentProviderByCode(
           code,
