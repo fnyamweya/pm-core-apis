@@ -134,11 +134,11 @@ jobs:
         env:
           ENV_FILE: infra/.env.deploy
         run: |
-          if [ "${{ steps.derive.outputs.env_name }}" = "prod" ]; then
-            pnpm cdk deploy ${{ steps.derive.outputs.stack_id }} \
-              -c ecrRepositoryName=${{ steps.derive.outputs.ecr_repo }} \
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            pnpm cdk deploy core-apis-prod \
+              -c ecrRepositoryName=${{ vars.APP_NAME }}-prod \
               -c imageTag=${{ github.sha }} \
               --require-approval never
           else
-            pnpm cdk deploy ${{ steps.derive.outputs.stack_id }} --require-approval never
+            pnpm cdk deploy core-apis-dev --require-approval never
           fi
