@@ -1,3 +1,4 @@
+import * as cdk from 'aws-cdk-lib';
 import {
   Duration,
   RemovalPolicy,
@@ -63,9 +64,9 @@ export class CoreStack extends Stack {
     const dbSg = new ec2.SecurityGroup(this, 'DbSg', { vpc, allowAllOutbound: false });
     dbSg.addIngressRule(serviceSg, ec2.Port.tcp(5432));
 
-    const engine = rds.DatabaseInstanceEngine.postgres(
-      rds.PostgresEngineVersion.of('17.5', '17')
-    );
+    const engine = rds.DatabaseInstanceEngine.postgres({
+      version: rds.PostgresEngineVersion.of('17.5', '17'),
+    });
 
     const instanceType = ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MICRO);
 
@@ -271,7 +272,7 @@ export class CoreStack extends Stack {
       retention: logs.RetentionDays.ONE_WEEK,
     });
 
-    const migrationContainer = migrationTask.addContainer('migrations', {
+    migrationTask.addContainer('migrations', {
       image,
       logging: ecs.LogDriver.awsLogs({
         logGroup: migrationLogGroup,
@@ -292,44 +293,39 @@ export class CoreStack extends Stack {
       command: ['node', 'dist/src/scripts/migrationRunner.js', 'run'],
     });
 
-    migrationContainer.addPortMappings({ containerPort: props.containerPort });
-
     const taskExecutionRoleArn = migrationTask.obtainExecutionRole().roleArn;
     const taskRoleArn = migrationTask.taskRole.roleArn;
 
     const onEvent = new lambda.Function(this, 'MigrateOnEventFn', {
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       timeout: Duration.minutes(5),
       code: lambda.Code.fromInline(`
-        const AWS = require('aws-sdk');
-        const ecs = new AWS.ECS();
-        exports.handler = async (event) => {
-          const reqType = event.RequestType || 'Create';
-          if (reqType === 'Delete') {
-            return { PhysicalResourceId: event.PhysicalResourceId || 'migration-task' };
-          }
-          const props = event.ResourceProperties || {};
-          const params = {
-            cluster: props.clusterArn,
-            taskDefinition: props.taskDefinitionArn,
-            count: 1,
-            launchType: 'FARGATE',
-            networkConfiguration: {
-              awsvpcConfiguration: {
-                subnets: props.subnets,
-                securityGroups: props.securityGroups,
-                assignPublicIp: props.assignPublicIp || 'ENABLED'
-              }
+import boto3, json
+ecs = boto3.client('ecs')
+def handler(event, context):
+    req_type = event.get('RequestType','Create')
+    if req_type == 'Delete':
+        return {'PhysicalResourceId': event.get('PhysicalResourceId','migration-task')}
+    props = event.get('ResourceProperties', {})
+    resp = ecs.run_task(
+        cluster=props['clusterArn'],
+        taskDefinition=props['taskDefinitionArn'],
+        count=1,
+        launchType='FARGATE',
+        networkConfiguration={
+            'awsvpcConfiguration':{
+                'subnets': props['subnets'],
+                'securityGroups': props['securityGroups'],
+                'assignPublicIp': props.get('assignPublicIp','ENABLED')
             }
-          };
-          const out = await ecs.runTask(params).promise();
-          if (!out.tasks || !out.tasks[0] || !out.tasks[0].taskArn) {
-            throw new Error('Failed to start migration task: ' + JSON.stringify(out));
-          }
-          const taskArn = out.tasks[0].taskArn;
-          return { PhysicalResourceId: taskArn, Data: { taskArn } };
-        };
+        }
+    )
+    tasks = resp.get('tasks', [])
+    if not tasks or 'taskArn' not in tasks[0]:
+        raise Exception('Failed to start migration task: ' + json.dumps(resp, default=str))
+    task_arn = tasks[0]['taskArn']
+    return {'PhysicalResourceId': task_arn, 'Data': {'taskArn': task_arn}}
       `),
     });
 
@@ -347,24 +343,29 @@ export class CoreStack extends Stack {
     );
 
     const isComplete = new lambda.Function(this, 'MigrateIsCompleteFn', {
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       timeout: Duration.minutes(5),
       code: lambda.Code.fromInline(`
-        const AWS = require('aws-sdk');
-        const ecs = new AWS.ECS();
-        exports.handler = async (event) => {
-          const props = event.ResourceProperties || {};
-          const taskArn = event.PhysicalResourceId || (event.Data && event.Data.taskArn);
-          if (!taskArn) return { IsComplete: false };
-          const desc = await ecs.describeTasks({ cluster: props.clusterArn, tasks: [taskArn] }).promise();
-          const t = (desc.tasks || [])[0];
-          if (!t || t.lastStatus !== 'STOPPED') return { IsComplete: false };
-          const c = (t.containers || [])[0] || {};
-          const exit = c.exitCode == null ? 0 : c.exitCode;
-          if (exit !== 0) throw new Error('Migration task failed with exit code ' + exit);
-          return { IsComplete: true };
-        };
+import boto3
+ecs = boto3.client('ecs')
+def handler(event, context):
+    props = event.get('ResourceProperties', {})
+    task_arn = event.get('PhysicalResourceId') or (event.get('Data') or {}).get('taskArn')
+    if not task_arn:
+        return {'IsComplete': False}
+    resp = ecs.describe_tasks(cluster=props['clusterArn'], tasks=[task_arn])
+    tasks = resp.get('tasks', [])
+    if not tasks:
+        return {'IsComplete': False}
+    t = tasks[0]
+    if t.get('lastStatus') != 'STOPPED':
+        return {'IsComplete': False}
+    containers = t.get('containers', [])
+    exit_code = containers[0].get('exitCode', 0) if containers else 0
+    if exit_code != 0:
+        raise Exception(f'Migration task failed with exit code {exit_code}')
+    return {'IsComplete': True}
       `),
     });
     isComplete.addToRolePolicy(
@@ -387,7 +388,7 @@ export class CoreStack extends Stack {
 
     const runMigrationsCR =
       runMigrations
-        ? new cr.CustomResource(this, 'RunMigrations', {
+        ? new cdk.CustomResource(this, 'RunMigrations', {
             serviceToken: provider.serviceToken,
             properties: {
               clusterArn: cluster.clusterArn,
@@ -407,32 +408,27 @@ export class CoreStack extends Stack {
     }
 
     const scaleUpFn = new lambda.Function(this, 'ScaleUpServiceFn', {
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       timeout: Duration.minutes(5),
       code: lambda.Code.fromInline(`
-        const AWS = require('aws-sdk');
-        const ecs = new AWS.ECS();
-        const aas = new AWS.ApplicationAutoScaling();
-        exports.handler = async (event) => {
-          const reqType = event.RequestType || 'Create';
-          if (reqType === 'Delete') return { PhysicalResourceId: 'scale-up' };
-          const p = event.ResourceProperties || {};
-          await ecs.updateService({
-            cluster: p.clusterArn,
-            service: p.serviceName,
-            desiredCount: p.desiredCount
-          }).promise();
-          await aas.registerScalableTarget({
-            ServiceNamespace: 'ecs',
-            ResourceId: \`service/\${p.clusterName}/\${p.serviceName}\`,
-            ScalableDimension: 'ecs:service:DesiredCount',
-            MinCapacity: p.minCapacity,
-            MaxCapacity: p.maxCapacity,
-            SuspendedState: { DynamicScalingInSuspended: false, DynamicScalingOutSuspended: false, ScheduledScalingSuspended: false }
-          }).promise();
-          return { PhysicalResourceId: 'scale-up' };
-        };
+import boto3
+ecs = boto3.client('ecs')
+aas = boto3.client('application-autoscaling')
+def handler(event, context):
+    if event.get('RequestType','Create') == 'Delete':
+        return {'PhysicalResourceId': 'scale-up'}
+    p = event['ResourceProperties']
+    ecs.update_service(cluster=p['clusterArn'], service=p['serviceName'], desiredCount=int(p['desiredCount']))
+    aas.register_scalable_target(
+        ServiceNamespace='ecs',
+        ResourceId=f"service/{p['clusterName']}/{p['serviceName']}",
+        ScalableDimension='ecs:service:DesiredCount',
+        MinCapacity=int(p['minCapacity']),
+        MaxCapacity=int(p['maxCapacity']),
+        SuspendedState={'DynamicScalingInSuspended': False, 'DynamicScalingOutSuspended': False, 'ScheduledScalingSuspended': False}
+    )
+    return {'PhysicalResourceId': 'scale-up'}
       `),
     });
 
@@ -451,7 +447,7 @@ export class CoreStack extends Stack {
 
     const scaleUpCR =
       runMigrations
-        ? new cr.CustomResource(this, 'ScaleUpAfterMigrations', {
+        ? new cdk.CustomResource(this, 'ScaleUpAfterMigrations', {
             serviceToken: scaleUpFn.functionArn,
             properties: {
               clusterArn: cluster.clusterArn,
