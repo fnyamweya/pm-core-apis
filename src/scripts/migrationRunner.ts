@@ -1,102 +1,156 @@
-import { execSync } from 'child_process';
+import 'reflect-metadata';
+import fs from 'fs';
+import path from 'path';
+import { spawnSync } from 'child_process';
 import { Command } from 'commander';
-import { AppDataSource } from '../config/database';
+import database, { AppDataSource } from '../config/database';
 import { logger } from '../utils/logger';
+import { EnvConfiguration, isProductionEnvironment } from '../config/env';
 
 const program = new Command();
 
-async function runMigrations(): Promise<void> {
-  try {
-    await AppDataSource.initialize();
-    logger.info('Data Source has been initialized.');
-    await AppDataSource.runMigrations();
-    logger.info('Migrations have been successfully run.');
-  } catch (error: unknown) {
-    if (error instanceof Error) {
-      logger.error('Error during running migrations:', error.message);
-    } else {
-      logger.error('An unknown error occurred during running migrations.');
+function exitWith(code: number, msg?: string) {
+  if (msg) logger.error(msg);
+  try { if (AppDataSource.isInitialized) void AppDataSource.destroy(); } catch {}
+  process.exit(code);
+}
+
+async function waitForDb(retries: number, delayMs: number) {
+  for (let i = 1; i <= retries; i++) {
+    try {
+      await database.initialize();
+      await AppDataSource.query('SELECT 1');
+      return;
+    } catch (err) {
+      logger.error(`DB not ready (attempt ${i}/${retries})`, err as Error);
+      if (i === retries) throw err;
+      await new Promise((r) => setTimeout(r, delayMs));
     }
-    process.exit(1);
-  } finally {
-    await AppDataSource.destroy();
   }
 }
 
-async function revertMigrations(): Promise<void> {
+function getCliCmdArgs(sub: string, extra: string[] = []) {
+  const cliPath = require.resolve('typeorm/cli.js');
+  const isTsRuntime = !!process.env.TS_NODE;
+  const nodeArgs = isTsRuntime ? ['-r', 'ts-node/register/transpile-only'] : [];
+  return { cmd: process.execPath, args: [...nodeArgs, cliPath, sub, ...extra] };
+}
+
+function ensureMigrationsDir(tsPath = 'src/migrations', jsPath = 'dist/src/migrations') {
+  const target = process.env.TS_NODE ? tsPath : jsPath;
+  if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+  return target;
+}
+
+async function runMigrations(opts: { retries: number; delay: number }) {
   try {
-    await AppDataSource.initialize();
-    logger.info('Data Source has been initialized.');
+    await waitForDb(opts.retries, opts.delay);
+    const res = await AppDataSource.runMigrations();
+    const names = (res || []).map((m: any) => m.name || String(m));
+    logger.info(
+      names.length ? `Applied migrations: ${names.join(', ')}` : 'No pending migrations.'
+    );
+  } catch (e) {
+    exitWith(1, `Migration run failed: ${(e as Error).message}`);
+  } finally {
+    try { if (AppDataSource.isInitialized) await AppDataSource.destroy(); } catch {}
+  }
+}
+
+async function revertMigration(opts: { retries: number; delay: number }) {
+  try {
+    await waitForDb(opts.retries, opts.delay);
     await AppDataSource.undoLastMigration();
-    logger.info('Last migration has been successfully reverted.');
-  } catch (error: unknown) {
-    if (error instanceof Error) {
-      logger.error('Error during reverting migration:', error.message);
-    } else {
-      logger.error('An unknown error occurred during reverting migration.');
-    }
-    process.exit(1);
+    logger.info('Reverted last migration.');
+  } catch (e) {
+    exitWith(1, `Migration revert failed: ${(e as Error).message}`);
   } finally {
-    await AppDataSource.destroy();
+    try { if (AppDataSource.isInitialized) await AppDataSource.destroy(); } catch {}
   }
 }
 
-async function createMigration(name: string): Promise<void> {
-  try {
-    logger.info(`Creating migration: ${name}`);
-    execSync(
-      `ts-node ./node_modules/typeorm/cli.js migration:create src/migrations/${name}`,
-      { stdio: 'inherit' }
-    );
-    logger.info(`Migration ${name} created successfully.`);
-  } catch (error: unknown) {
-    if (error instanceof Error) {
-      logger.error(`Error creating migration ${name}:`, error.message);
-    } else {
-      logger.error('An unknown error occurred during creating migration.');
-    }
-    process.exit(1);
+function assertDevOnly(op: string) {
+  if (isProductionEnvironment) {
+    exitWith(2, `${op} is blocked in production. Use CI one-off tasks or run locally.`);
   }
 }
 
-async function generateMigration(name: string): Promise<void> {
-  try {
-    logger.info(`Generating migration: ${name}`);
-    execSync(
-      `ts-node ./node_modules/typeorm/cli.js migration:generate -d ./src/config/database.ts src/migrations/${name}`,
-      { stdio: 'inherit' }
-    );
-    logger.info(`Migration ${name} generated successfully.`);
-  } catch (error: unknown) {
-    if (error instanceof Error) {
-      logger.error(`Error generating migration ${name}:`, error.message);
-    } else {
-      logger.error('An unknown error occurred during generating migration.');
-    }
-    process.exit(1);
-  }
+function dataSourceArgForGenerate() {
+  // In dev we point CLI to the TS data-source module
+  // Matches your project layout where the DataSource is configured in src/config/database.ts
+  return ['-d', path.join(process.cwd(), 'src/config/database.ts')];
 }
 
-// Setup commander commands
+function spawnCliOrExit(sub: string, extra: string[]) {
+  const { cmd, args } = getCliCmdArgs(sub, extra);
+  const result = spawnSync(cmd, args, {
+    stdio: 'inherit',
+    env: { ...process.env, TS_NODE_TRANSPILE_ONLY: '1' },
+  });
+  if (result.status !== 0) exitWith(result.status ?? 1, `typeorm ${sub} failed`);
+}
+
+function timestamped(name: string) {
+  const ts = new Date().toISOString().replace(/[-T:\.Z]/g, '').slice(0, 14);
+  return `${ts}-${name}`;
+}
+
+async function createMigration(name: string) {
+  assertDevOnly('migration:create');
+  const dir = ensureMigrationsDir('src/migrations');
+  const file = path.join(dir, timestamped(name));
+  logger.info(`Creating migration ${file}`);
+  spawnCliOrExit('migration:create', [file]);
+  logger.info('Migration created.');
+}
+
+async function generateMigration(name: string) {
+  assertDevOnly('migration:generate');
+  const dir = ensureMigrationsDir('src/migrations');
+  const file = path.join(dir, timestamped(name));
+  logger.info(`Generating migration ${file}`);
+  const args = ['migration:generate', ...dataSourceArgForGenerate(), file];
+  // Use pretty SQL and safe defaults
+  spawnCliOrExit(args[0], args.slice(1));
+  logger.info('Migration generated.');
+}
+
+program
+  .name('migration-runner')
+  .description('TypeORM migration helper')
+  .version('1.0.0');
+
 program
   .command('run')
-  .description('Run pending migrations')
-  .action(runMigrations);
+  .option('--retries <n>', 'retry attempts for DB connect', String(EnvConfiguration.DB_RETRY_ATTEMPTS || 5))
+  .option('--delay <ms>', 'delay between retries (ms)', String(EnvConfiguration.DB_RETRY_DELAY || 1000))
+  .action(async (opts: { retries: string; delay: string }) => {
+    const retries = parseInt(opts.retries, 10) || 5;
+    const delay = parseInt(opts.delay, 10) || 1000;
+    await runMigrations({ retries, delay });
+  });
 
 program
   .command('revert')
-  .description('Revert the last applied migration')
-  .action(revertMigrations);
+  .option('--retries <n>', 'retry attempts for DB connect', String(EnvConfiguration.DB_RETRY_ATTEMPTS || 3))
+  .option('--delay <ms>', 'delay between retries (ms)', String(EnvConfiguration.DB_RETRY_DELAY || 1000))
+  .action(async (opts: { retries: string; delay: string }) => {
+    const retries = parseInt(opts.retries, 10) || 3;
+    const delay = parseInt(opts.delay, 10) || 1000;
+    await revertMigration({ retries, delay });
+  });
 
 program
-  .command('create <name>')
-  .description('Create a new blank migration with the given name')
-  .action(createMigration);
+  .command('create')
+  .argument('<name>', 'migration name')
+  .action(async (name: string) => { await createMigration(name); });
 
 program
-  .command('generate <name>')
-  .description('Generate a migration based on schema changes')
-  .action(generateMigration);
+  .command('generate')
+  .argument('<name>', 'migration name')
+  .action(async (name: string) => { await generateMigration(name); });
 
-// Parse command line arguments
+process.on('SIGINT', () => exitWith(130, 'SIGINT'));
+process.on('SIGTERM', () => exitWith(143, 'SIGTERM'));
+
 program.parse(process.argv);

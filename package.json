@@ -7,10 +7,12 @@
     "start": "node ./dist/src/server.js",
     "build": "tsc",
     "test": "echo \"(no tests)\"",
-    "migration:generate": "ts-node ./src/scripts/migrationRunner.ts generate $npm_config_name",
     "migration:run": "ts-node ./src/scripts/migrationRunner.ts run",
     "migration:revert": "ts-node ./src/scripts/migrationRunner.ts revert",
-    "migration:create": "ts-node ./src/scripts/migrationRunner.ts create $npm_config_name"
+    "migration:create": "ts-node ./src/scripts/migrationRunner.ts create $npm_config_name",
+    "migration:generate": "ts-node ./src/scripts/migrationRunner.ts generate $npm_config_name",
+    "migration:run:prod": "node dist/src/scripts/migrationRunner.js run",
+    "migration:revert:prod": "node dist/src/scripts/migrationRunner.js revert"
   },
   "keywords": [],
   "author": "",

@@ -14,6 +14,9 @@ import {
   aws_secretsmanager as secrets,
   aws_applicationautoscaling as appscaling,
   aws_elasticache as elasticache,
+  aws_lambda as lambda,
+  aws_iam as iam,
+  custom_resources as cr,
 } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { resolve } from 'path';
@@ -33,6 +36,7 @@ export interface CoreStackProps extends StackProps {
   imageTag?: string;
   appConfig?: Record<string, string>;
   appSecrets?: Record<string, string>;
+  runMigrationsOnDeploy?: boolean;
 }
 
 export class CoreStack extends Stack {
@@ -41,6 +45,7 @@ export class CoreStack extends Stack {
 
     const name = `${props.appName}-${props.envName}`;
     const isProd = props.envName === 'prod';
+    const runMigrations = props.runMigrationsOnDeploy ?? true;
 
     const vpc = new ec2.Vpc(this, 'Vpc', {
       vpcName: `${name}-vpc`,
@@ -55,20 +60,12 @@ export class CoreStack extends Stack {
     const albSg = new ec2.SecurityGroup(this, 'AlbSg', { vpc, allowAllOutbound: true });
     albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80));
     const serviceSg = new ec2.SecurityGroup(this, 'ServiceSg', { vpc, allowAllOutbound: true });
-
     const dbSg = new ec2.SecurityGroup(this, 'DbSg', { vpc, allowAllOutbound: false });
     dbSg.addIngressRule(serviceSg, ec2.Port.tcp(5432));
 
-    const engine = rds.DatabaseInstanceEngine.postgres({
-      version: rds.PostgresEngineVersion.of('16.3', '16'),
-    });
-
-    const pgParams = new rds.ParameterGroup(this, 'PgParams', {
-      engine,
-      parameters: {
-        'rds.force_ssl': '1',
-      },
-    });
+    const engine = rds.DatabaseInstanceEngine.postgres(
+      rds.PostgresEngineVersion.of('17.5', '17')
+    );
 
     const instanceType = ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MICRO);
 
@@ -77,7 +74,6 @@ export class CoreStack extends Stack {
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       securityGroups: [dbSg],
       engine,
-      parameterGroup: pgParams,
       instanceType,
       allocatedStorage: 20,
       maxAllocatedStorage: 100,
@@ -172,7 +168,6 @@ export class CoreStack extends Stack {
       transitEncryptionEnabled: false,
     });
     redis.addDependency(redisSubnetGroup);
-    if (!isProd) redis.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
     const redisHost = redis.attrPrimaryEndPointAddress;
     const redisPort = redis.attrPrimaryEndPointPort || '6379';
@@ -180,20 +175,14 @@ export class CoreStack extends Stack {
     const baseEnv: Record<string, string> = {
       NODE_ENV: props.envName,
       PORT: String(props.containerPort),
-
       DB_HOST: db.instanceEndpoint.hostname,
       DB_PORT: '5432',
       DB_NAME: 'app',
       DB_USER: 'postgres',
-
-      DB_SSL: 'true',
-      DB_SSL_REJECT_UNAUTHORIZED: isProd ? 'true' : 'false',
-
       REDIS_ENABLED: 'true',
       REDIS_HOST: redisHost,
       REDIS_PORT: redisPort,
     };
-
     const mergedEnv = { ...baseEnv, ...(props.appConfig ?? {}) };
 
     const svc = new ecs_patterns.ApplicationLoadBalancedFargateService(this, 'Service', {
@@ -204,7 +193,7 @@ export class CoreStack extends Stack {
       listenerPort: 80,
       cpu: props.cpu,
       memoryLimitMiB: props.memoryMiB,
-      desiredCount: props.desiredCount,
+      desiredCount: 0,
       enableExecuteCommand: true,
       taskSubnets: { subnetType: ec2.SubnetType.PUBLIC },
       capacityProviderStrategies: props.enableFargateSpot
@@ -228,24 +217,24 @@ export class CoreStack extends Stack {
                 Object.keys(props.appSecrets ?? {}).map((k) => [
                   k,
                   ecs.Secret.fromSecretsManager(appSecrets!, k),
-                ]),
+                ])
               )
             : {}),
         },
       },
     });
 
-    svc.loadBalancer.addSecurityGroup(albSg);
-    db.connections.allowDefaultPortFrom(svc.service);
-
     svc.targetGroup.configureHealthCheck({
       path: '/api/v1/health',
-      healthyHttpCodes: '200,204',
+      healthyHttpCodes: '200',
       healthyThresholdCount: 2,
       unhealthyThresholdCount: 3,
       interval: Duration.seconds(20),
       timeout: Duration.seconds(5),
     });
+
+    svc.loadBalancer.addSecurityGroup(albSg);
+    db.connections.allowDefaultPortFrom(svc.service);
 
     if (repo) {
       repo.grantPull(svc.taskDefinition.obtainExecutionRole());
@@ -253,14 +242,12 @@ export class CoreStack extends Stack {
     }
 
     const scaling = svc.service.autoScaleTaskCount({
-      minCapacity: props.minCapacity,
+      minCapacity: 0,
       maxCapacity: props.maxCapacity,
     });
-
     scaling.scaleOnCpuUtilization('CpuScaling', {
       targetUtilizationPercent: isProd ? 60 : 50,
     });
-
     if (!isProd) {
       scaling.scaleOnSchedule('NightDown', {
         schedule: appscaling.Schedule.cron({ minute: '0', hour: '20' }),
@@ -272,6 +259,214 @@ export class CoreStack extends Stack {
         minCapacity: Math.max(1, props.desiredCount),
         maxCapacity: props.maxCapacity,
       });
+    }
+
+    const migrationTask = new ecs.FargateTaskDefinition(this, 'MigrationTaskDef', {
+      cpu: props.cpu,
+      memoryLimitMiB: props.memoryMiB,
+    });
+
+    const migrationLogGroup = new logs.LogGroup(this, 'MigrationLogs', {
+      logGroupName: `/ecs/${props.appName}/${props.envName}/migrations`,
+      retention: logs.RetentionDays.ONE_WEEK,
+    });
+
+    const migrationContainer = migrationTask.addContainer('migrations', {
+      image,
+      logging: ecs.LogDriver.awsLogs({
+        logGroup: migrationLogGroup,
+        streamPrefix: 'migrations',
+      }),
+      environment: mergedEnv,
+      secrets: {
+        DB_PASSWORD: ecs.Secret.fromSecretsManager(db.secret!, 'password'),
+        ...(appSecrets
+          ? Object.fromEntries(
+              Object.keys(props.appSecrets ?? {}).map((k) => [
+                k,
+                ecs.Secret.fromSecretsManager(appSecrets!, k),
+              ])
+            )
+          : {}),
+      },
+      command: ['node', 'dist/src/scripts/migrationRunner.js', 'run'],
+    });
+
+    migrationContainer.addPortMappings({ containerPort: props.containerPort });
+
+    const taskExecutionRoleArn = migrationTask.obtainExecutionRole().roleArn;
+    const taskRoleArn = migrationTask.taskRole.roleArn;
+
+    const onEvent = new lambda.Function(this, 'MigrateOnEventFn', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      timeout: Duration.minutes(5),
+      code: lambda.Code.fromInline(`
+        const AWS = require('aws-sdk');
+        const ecs = new AWS.ECS();
+        exports.handler = async (event) => {
+          const reqType = event.RequestType || 'Create';
+          if (reqType === 'Delete') {
+            return { PhysicalResourceId: event.PhysicalResourceId || 'migration-task' };
+          }
+          const props = event.ResourceProperties || {};
+          const params = {
+            cluster: props.clusterArn,
+            taskDefinition: props.taskDefinitionArn,
+            count: 1,
+            launchType: 'FARGATE',
+            networkConfiguration: {
+              awsvpcConfiguration: {
+                subnets: props.subnets,
+                securityGroups: props.securityGroups,
+                assignPublicIp: props.assignPublicIp || 'ENABLED'
+              }
+            }
+          };
+          const out = await ecs.runTask(params).promise();
+          if (!out.tasks || !out.tasks[0] || !out.tasks[0].taskArn) {
+            throw new Error('Failed to start migration task: ' + JSON.stringify(out));
+          }
+          const taskArn = out.tasks[0].taskArn;
+          return { PhysicalResourceId: taskArn, Data: { taskArn } };
+        };
+      `),
+    });
+
+    onEvent.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:RunTask'],
+        resources: ['*'],
+      })
+    );
+    onEvent.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['iam:PassRole'],
+        resources: [taskExecutionRoleArn, taskRoleArn],
+      })
+    );
+
+    const isComplete = new lambda.Function(this, 'MigrateIsCompleteFn', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      timeout: Duration.minutes(5),
+      code: lambda.Code.fromInline(`
+        const AWS = require('aws-sdk');
+        const ecs = new AWS.ECS();
+        exports.handler = async (event) => {
+          const props = event.ResourceProperties || {};
+          const taskArn = event.PhysicalResourceId || (event.Data && event.Data.taskArn);
+          if (!taskArn) return { IsComplete: false };
+          const desc = await ecs.describeTasks({ cluster: props.clusterArn, tasks: [taskArn] }).promise();
+          const t = (desc.tasks || [])[0];
+          if (!t || t.lastStatus !== 'STOPPED') return { IsComplete: false };
+          const c = (t.containers || [])[0] || {};
+          const exit = c.exitCode == null ? 0 : c.exitCode;
+          if (exit !== 0) throw new Error('Migration task failed with exit code ' + exit);
+          return { IsComplete: true };
+        };
+      `),
+    });
+    isComplete.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:DescribeTasks'],
+        resources: ['*'],
+      })
+    );
+
+    const provider = new cr.Provider(this, 'MigrationProvider', {
+      onEventHandler: onEvent,
+      isCompleteHandler: isComplete,
+      totalTimeout: Duration.minutes(30),
+      queryInterval: Duration.seconds(15),
+      logRetention: logs.RetentionDays.ONE_WEEK,
+    });
+
+    const runSubnets = vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC });
+    const runSecurityGroups = [serviceSg.securityGroupId];
+
+    const runMigrationsCR =
+      runMigrations
+        ? new cr.CustomResource(this, 'RunMigrations', {
+            serviceToken: provider.serviceToken,
+            properties: {
+              clusterArn: cluster.clusterArn,
+              taskDefinitionArn: migrationTask.taskDefinitionArn,
+              subnets: runSubnets.subnetIds,
+              securityGroups: runSecurityGroups,
+              assignPublicIp: 'ENABLED',
+            },
+            resourceType: 'Custom::RunDbMigrations',
+          })
+        : undefined;
+
+    if (runMigrationsCR) {
+      runMigrationsCR.node.addDependency(db);
+      runMigrationsCR.node.addDependency(redis);
+      runMigrationsCR.node.addDependency(svc.service);
+    }
+
+    const scaleUpFn = new lambda.Function(this, 'ScaleUpServiceFn', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      timeout: Duration.minutes(5),
+      code: lambda.Code.fromInline(`
+        const AWS = require('aws-sdk');
+        const ecs = new AWS.ECS();
+        const aas = new AWS.ApplicationAutoScaling();
+        exports.handler = async (event) => {
+          const reqType = event.RequestType || 'Create';
+          if (reqType === 'Delete') return { PhysicalResourceId: 'scale-up' };
+          const p = event.ResourceProperties || {};
+          await ecs.updateService({
+            cluster: p.clusterArn,
+            service: p.serviceName,
+            desiredCount: p.desiredCount
+          }).promise();
+          await aas.registerScalableTarget({
+            ServiceNamespace: 'ecs',
+            ResourceId: \`service/\${p.clusterName}/\${p.serviceName}\`,
+            ScalableDimension: 'ecs:service:DesiredCount',
+            MinCapacity: p.minCapacity,
+            MaxCapacity: p.maxCapacity,
+            SuspendedState: { DynamicScalingInSuspended: false, DynamicScalingOutSuspended: false, ScheduledScalingSuspended: false }
+          }).promise();
+          return { PhysicalResourceId: 'scale-up' };
+        };
+      `),
+    });
+
+    scaleUpFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['ecs:UpdateService'],
+        resources: ['*'],
+      })
+    );
+    scaleUpFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['application-autoscaling:RegisterScalableTarget'],
+        resources: ['*'],
+      })
+    );
+
+    const scaleUpCR =
+      runMigrations
+        ? new cr.CustomResource(this, 'ScaleUpAfterMigrations', {
+            serviceToken: scaleUpFn.functionArn,
+            properties: {
+              clusterArn: cluster.clusterArn,
+              clusterName: cluster.clusterName,
+              serviceName: svc.service.serviceName,
+              desiredCount: props.desiredCount,
+              minCapacity: props.minCapacity,
+              maxCapacity: props.maxCapacity,
+            },
+            resourceType: 'Custom::ScaleUpService',
+          })
+        : undefined;
+
+    if (scaleUpCR && runMigrationsCR) {
+      scaleUpCR.node.addDependency(runMigrationsCR);
     }
 
     new CfnOutput(this, 'AlbDnsName', { value: svc.loadBalancer.loadBalancerDnsName });
