@@ -47,6 +47,8 @@ export class CoreStack extends Stack {
     const name = `${props.appName}-${props.envName}`;
     const isProd = props.envName === 'prod';
     const runMigrations = props.runMigrationsOnDeploy ?? true;
+    const region = Stack.of(this).region;
+    const ensuredDesired = Math.max(1, props.desiredCount ?? 1);
 
     const vpc = new ec2.Vpc(this, 'Vpc', {
       vpcName: `${name}-vpc`,
@@ -178,7 +180,8 @@ export class CoreStack extends Stack {
       DB_USER: 'postgres',
       REDIS_ENABLED: 'true',
       REDIS_HOST: redisHost,
-      REDIS_PORT: redisPort
+      REDIS_PORT: redisPort,
+      AWS_REGION: region
     };
     const mergedEnv = { ...baseEnv, ...(props.appConfig ?? {}) };
 
@@ -190,7 +193,7 @@ export class CoreStack extends Stack {
       listenerPort: 80,
       cpu: props.cpu,
       memoryLimitMiB: props.memoryMiB,
-      desiredCount: 1,
+      desiredCount: ensuredDesired,
       enableExecuteCommand: true,
       taskSubnets: { subnetType: ec2.SubnetType.PUBLIC },
       capacityProviderStrategies: props.enableFargateSpot
@@ -279,6 +282,11 @@ export class CoreStack extends Stack {
       },
       command: ['node', 'dist/src/scripts/migrationRunner.js', 'run']
     });
+
+    if (repo) {
+      repo.grantPull(migrationTask.obtainExecutionRole());
+      repo.grantPull(migrationTask.taskRole);
+    }
 
     const taskExecutionRoleArn = migrationTask.obtainExecutionRole().roleArn;
     const taskRoleArn = migrationTask.taskRole.roleArn;
