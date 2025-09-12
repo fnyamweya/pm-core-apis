@@ -17,7 +17,6 @@ import {
   aws_elasticache as elasticache,
   aws_lambda as lambda,
   aws_iam as iam,
-  custom_resources as cr
 } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { resolve } from 'path';
@@ -316,35 +315,31 @@ def handler(event, context):
       `)
     });
 
-    scaleServiceFn.addToRolePolicy(
-      new iam.PolicyStatement({ actions: ['ecs:UpdateService'], resources: ['*'] })
-    );
-    scaleServiceFn.addToRolePolicy(
-      new iam.PolicyStatement({ actions: ['application-autoscaling:RegisterScalableTarget'], resources: ['*'] })
-    );
+    scaleServiceFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['ecs:UpdateService'], resources: ['*'] }));
+    scaleServiceFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['application-autoscaling:RegisterScalableTarget'], resources: ['*'] }));
 
-    const onEvent = new lambda.Function(this, 'MigrateOnEventFn', {
+    const runMigrationsFn = new lambda.Function(this, 'RunMigrationsFn', {
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
-      timeout: Duration.minutes(5),
+      timeout: Duration.minutes(14),
       code: lambda.Code.fromInline(`
-import boto3, json
+import boto3, json, time
 ecs = boto3.client('ecs')
 def handler(event, context):
     req_type = event.get('RequestType','Create')
     if req_type == 'Delete':
-        return {'PhysicalResourceId': event.get('PhysicalResourceId','migration-task')}
-    props = event.get('ResourceProperties', {})
+        return {'PhysicalResourceId': event.get('PhysicalResourceId','migrate-once')}
+    p = event['ResourceProperties']
     resp = ecs.run_task(
-        cluster=props['clusterArn'],
-        taskDefinition=props['taskDefinitionArn'],
+        cluster=p['clusterArn'],
+        taskDefinition=p['taskDefinitionArn'],
         count=1,
         launchType='FARGATE',
         networkConfiguration={
             'awsvpcConfiguration':{
-                'subnets': props['subnets'],
-                'securityGroups': props['securityGroups'],
-                'assignPublicIp': props.get('assignPublicIp','ENABLED')
+                'subnets': p['subnets'],
+                'securityGroups': p['securityGroups'],
+                'assignPublicIp': p.get('assignPublicIp','ENABLED')
             }
         }
     )
@@ -352,49 +347,23 @@ def handler(event, context):
     if not tasks or 'taskArn' not in tasks[0]:
         raise Exception('Failed to start migration task: ' + json.dumps(resp, default=str))
     task_arn = tasks[0]['taskArn']
-    return {'PhysicalResourceId': task_arn, 'Data': {'taskArn': task_arn}}
+    physical_id = task_arn
+    while True:
+        d = ecs.describe_tasks(cluster=p['clusterArn'], tasks=[task_arn])
+        tlist = d.get('tasks') or []
+        if tlist and tlist[0].get('lastStatus') == 'STOPPED':
+            containers = tlist[0].get('containers') or []
+            exit_code = containers[0].get('exitCode', 0) if containers else 0
+            if exit_code != 0:
+                raise Exception(f'Migration task failed with exit code {exit_code}')
+            break
+        time.sleep(10)
+    return {'PhysicalResourceId': physical_id}
       `)
     });
 
-    onEvent.addToRolePolicy(new iam.PolicyStatement({ actions: ['ecs:RunTask'], resources: ['*'] }));
-    onEvent.addToRolePolicy(new iam.PolicyStatement({ actions: ['iam:PassRole'], resources: [taskExecutionRoleArn, taskRoleArn] }));
-
-    const isComplete = new lambda.Function(this, 'MigrateIsCompleteFn', {
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'index.handler',
-      timeout: Duration.minutes(5),
-      code: lambda.Code.fromInline(`
-import boto3
-ecs = boto3.client('ecs')
-def handler(event, context):
-    props = event.get('ResourceProperties', {})
-    task_arn = event.get('PhysicalResourceId') or (event.get('Data') or {}).get('taskArn')
-    if not task_arn:
-        return {'IsComplete': False}
-    resp = ecs.describe_tasks(cluster=props['clusterArn'], tasks=[task_arn])
-    tasks = resp.get('tasks', [])
-    if not tasks:
-        return {'IsComplete': False}
-    t = tasks[0]
-    if t.get('lastStatus') != 'STOPPED':
-        return {'IsComplete': False}
-    containers = t.get('containers', [])
-    exit_code = containers[0].get('exitCode', 0) if containers else 0
-    if exit_code != 0:
-        raise Exception(f'Migration task failed with exit code {exit_code}')
-    return {'IsComplete': True}
-      `)
-    });
-
-    isComplete.addToRolePolicy(new iam.PolicyStatement({ actions: ['ecs:DescribeTasks'], resources: ['*'] }));
-
-    const provider = new cr.Provider(this, 'MigrationProvider', {
-      onEventHandler: onEvent,
-      isCompleteHandler: isComplete,
-      totalTimeout: Duration.minutes(30),
-      queryInterval: Duration.seconds(15),
-      logRetention: logs.RetentionDays.ONE_WEEK
-    });
+    runMigrationsFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['ecs:RunTask', 'ecs:DescribeTasks'], resources: ['*'] }));
+    runMigrationsFn.addToRolePolicy(new iam.PolicyStatement({ actions: ['iam:PassRole'], resources: [taskExecutionRoleArn, taskRoleArn] }));
 
     const runSubnets = vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC });
     const runSecurityGroups = [serviceSg.securityGroupId];
@@ -420,7 +389,7 @@ def handler(event, context):
 
     const runMigrationsCR = runMigrations
       ? new cdk.CustomResource(this, 'RunMigrations', {
-          serviceToken: provider.serviceToken,
+          serviceToken: runMigrationsFn.functionArn,
           properties: {
             clusterArn: cluster.clusterArn,
             taskDefinitionArn: migrationTask.taskDefinitionArn,
