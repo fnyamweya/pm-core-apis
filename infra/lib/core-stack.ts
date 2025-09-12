@@ -17,7 +17,7 @@ import {
   aws_elasticache as elasticache,
   aws_lambda as lambda,
   aws_iam as iam,
-  custom_resources as cr,
+  custom_resources as cr
 } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { resolve } from 'path';
@@ -54,8 +54,8 @@ export class CoreStack extends Stack {
       maxAzs: 2,
       subnetConfiguration: [
         { name: 'public', subnetType: ec2.SubnetType.PUBLIC, cidrMask: 24 },
-        { name: 'isolated', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 },
-      ],
+        { name: 'isolated', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 }
+      ]
     });
 
     const albSg = new ec2.SecurityGroup(this, 'AlbSg', { vpc, allowAllOutbound: true });
@@ -65,9 +65,8 @@ export class CoreStack extends Stack {
     dbSg.addIngressRule(serviceSg, ec2.Port.tcp(5432));
 
     const engine = rds.DatabaseInstanceEngine.postgres({
-      version: rds.PostgresEngineVersion.of('17.5', '17'),
+      version: rds.PostgresEngineVersion.of('17.5', '17')
     });
-
     const instanceType = ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MICRO);
 
     const db = new rds.DatabaseInstance(this, 'Postgres', {
@@ -87,9 +86,9 @@ export class CoreStack extends Stack {
       removalPolicy: isProd ? RemovalPolicy.SNAPSHOT : RemovalPolicy.DESTROY,
       deleteAutomatedBackups: !isProd,
       credentials: rds.Credentials.fromGeneratedSecret('postgres', {
-        secretName: `${name}/db-credentials`,
+        secretName: `${name}/db-credentials`
       }),
-      databaseName: 'app',
+      databaseName: 'app'
     });
 
     const secretFields: Record<string, SecretValue> = {};
@@ -101,19 +100,19 @@ export class CoreStack extends Stack {
       Object.keys(secretFields).length > 0
         ? new secrets.Secret(this, 'AppSecrets', {
             secretName: `${name}/app-secrets`,
-            secretObjectValue: secretFields,
+            secretObjectValue: secretFields
           })
         : undefined;
 
     const cluster = new ecs.Cluster(this, 'Cluster', {
       vpc,
       clusterName: `${name}-cluster`,
-      containerInsights: true,
+      containerInsights: true
     });
 
     const logGroup = new logs.LogGroup(this, 'Logs', {
       logGroupName: `/ecs/${props.appName}/${props.envName}`,
-      retention: logs.RetentionDays.ONE_MONTH,
+      retention: logs.RetentionDays.ONE_MONTH
     });
 
     let image: ecs.ContainerImage;
@@ -134,8 +133,8 @@ export class CoreStack extends Stack {
           '**/node_modules/**',
           '*.md',
           'README*',
-          'LICENSE*',
-        ],
+          'LICENSE*'
+        ]
       });
     } else {
       const repoName = props.ecrRepositoryName ?? `${props.appName}-${props.envName}`;
@@ -145,15 +144,12 @@ export class CoreStack extends Stack {
 
     const redisSg = new ec2.SecurityGroup(this, 'RedisSg', { vpc, allowAllOutbound: true });
     redisSg.addIngressRule(serviceSg, ec2.Port.tcp(6379));
-
     const redisSubnets = vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_ISOLATED });
-
     const redisSubnetGroup = new elasticache.CfnSubnetGroup(this, 'RedisSubnetGroup', {
       cacheSubnetGroupName: `${name}-redis-subnets`,
       description: `${name} redis subnets`,
-      subnetIds: redisSubnets.subnetIds,
+      subnetIds: redisSubnets.subnetIds
     });
-
     const redis = new elasticache.CfnReplicationGroup(this, 'Redis', {
       engine: 'redis',
       engineVersion: '7.1',
@@ -166,7 +162,7 @@ export class CoreStack extends Stack {
       cacheSubnetGroupName: redisSubnetGroup.cacheSubnetGroupName!,
       securityGroupIds: [redisSg.securityGroupId],
       atRestEncryptionEnabled: false,
-      transitEncryptionEnabled: false,
+      transitEncryptionEnabled: false
     });
     redis.addDependency(redisSubnetGroup);
 
@@ -182,7 +178,7 @@ export class CoreStack extends Stack {
       DB_USER: 'postgres',
       REDIS_ENABLED: 'true',
       REDIS_HOST: redisHost,
-      REDIS_PORT: redisPort,
+      REDIS_PORT: redisPort
     };
     const mergedEnv = { ...baseEnv, ...(props.appConfig ?? {}) };
 
@@ -194,13 +190,13 @@ export class CoreStack extends Stack {
       listenerPort: 80,
       cpu: props.cpu,
       memoryLimitMiB: props.memoryMiB,
-      desiredCount: 0,
+      desiredCount: 1,
       enableExecuteCommand: true,
       taskSubnets: { subnetType: ec2.SubnetType.PUBLIC },
       capacityProviderStrategies: props.enableFargateSpot
         ? [
             { capacityProvider: 'FARGATE_SPOT', weight: 1 },
-            { capacityProvider: 'FARGATE', weight: 1 },
+            { capacityProvider: 'FARGATE', weight: 1 }
           ]
         : undefined,
       securityGroups: [serviceSg],
@@ -215,14 +211,11 @@ export class CoreStack extends Stack {
           DB_PASSWORD: ecs.Secret.fromSecretsManager(db.secret!, 'password'),
           ...(appSecrets
             ? Object.fromEntries(
-                Object.keys(props.appSecrets ?? {}).map((k) => [
-                  k,
-                  ecs.Secret.fromSecretsManager(appSecrets!, k),
-                ])
+                Object.keys(props.appSecrets ?? {}).map((k) => [k, ecs.Secret.fromSecretsManager(appSecrets!, k)])
               )
-            : {}),
-        },
-      },
+            : {})
+        }
+      }
     });
 
     svc.targetGroup.configureHealthCheck({
@@ -231,7 +224,7 @@ export class CoreStack extends Stack {
       healthyThresholdCount: 2,
       unhealthyThresholdCount: 3,
       interval: Duration.seconds(20),
-      timeout: Duration.seconds(5),
+      timeout: Duration.seconds(5)
     });
 
     svc.loadBalancer.addSecurityGroup(albSg);
@@ -244,57 +237,83 @@ export class CoreStack extends Stack {
 
     const scaling = svc.service.autoScaleTaskCount({
       minCapacity: 0,
-      maxCapacity: props.maxCapacity,
+      maxCapacity: props.maxCapacity
     });
     scaling.scaleOnCpuUtilization('CpuScaling', {
-      targetUtilizationPercent: isProd ? 60 : 50,
+      targetUtilizationPercent: isProd ? 60 : 50
     });
     if (!isProd) {
       scaling.scaleOnSchedule('NightDown', {
         schedule: appscaling.Schedule.cron({ minute: '0', hour: '20' }),
         minCapacity: 0,
-        maxCapacity: Math.max(0, props.minCapacity),
+        maxCapacity: Math.max(0, props.minCapacity)
       });
       scaling.scaleOnSchedule('MorningUp', {
         schedule: appscaling.Schedule.cron({ minute: '0', hour: '6' }),
         minCapacity: Math.max(1, props.desiredCount),
-        maxCapacity: props.maxCapacity,
+        maxCapacity: props.maxCapacity
       });
     }
 
     const migrationTask = new ecs.FargateTaskDefinition(this, 'MigrationTaskDef', {
       cpu: props.cpu,
-      memoryLimitMiB: props.memoryMiB,
+      memoryLimitMiB: props.memoryMiB
     });
 
     const migrationLogGroup = new logs.LogGroup(this, 'MigrationLogs', {
       logGroupName: `/ecs/${props.appName}/${props.envName}/migrations`,
-      retention: logs.RetentionDays.ONE_WEEK,
+      retention: logs.RetentionDays.ONE_WEEK
     });
 
     migrationTask.addContainer('migrations', {
       image,
-      logging: ecs.LogDriver.awsLogs({
-        logGroup: migrationLogGroup,
-        streamPrefix: 'migrations',
-      }),
+      logging: ecs.LogDriver.awsLogs({ logGroup: migrationLogGroup, streamPrefix: 'migrations' }),
       environment: mergedEnv,
       secrets: {
         DB_PASSWORD: ecs.Secret.fromSecretsManager(db.secret!, 'password'),
         ...(appSecrets
           ? Object.fromEntries(
-              Object.keys(props.appSecrets ?? {}).map((k) => [
-                k,
-                ecs.Secret.fromSecretsManager(appSecrets!, k),
-              ])
+              Object.keys(props.appSecrets ?? {}).map((k) => [k, ecs.Secret.fromSecretsManager(appSecrets!, k)])
             )
-          : {}),
+          : {})
       },
-      command: ['node', 'dist/src/scripts/migrationRunner.js', 'run'],
+      command: ['node', 'dist/src/scripts/migrationRunner.js', 'run']
     });
 
     const taskExecutionRoleArn = migrationTask.obtainExecutionRole().roleArn;
     const taskRoleArn = migrationTask.taskRole.roleArn;
+
+    const scaleServiceFn = new lambda.Function(this, 'ScaleServiceFn', {
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      timeout: Duration.minutes(5),
+      code: lambda.Code.fromInline(`
+import boto3
+ecs = boto3.client('ecs')
+aas = boto3.client('application-autoscaling')
+def handler(event, context):
+    if event.get('RequestType','Create') == 'Delete':
+        return {'PhysicalResourceId': 'scale-service'}
+    p = event['ResourceProperties']
+    ecs.update_service(cluster=p['clusterArn'], service=p['serviceName'], desiredCount=int(p['desiredCount']))
+    aas.register_scalable_target(
+        ServiceNamespace='ecs',
+        ResourceId=f"service/{p['clusterName']}/{p['serviceName']}",
+        ScalableDimension='ecs:service:DesiredCount',
+        MinCapacity=int(p['minCapacity']),
+        MaxCapacity=int(p['maxCapacity']),
+        SuspendedState={'DynamicScalingInSuspended': False, 'DynamicScalingOutSuspended': False, 'ScheduledScalingSuspended': False}
+    )
+    return {'PhysicalResourceId': 'scale-service'}
+      `)
+    });
+
+    scaleServiceFn.addToRolePolicy(
+      new iam.PolicyStatement({ actions: ['ecs:UpdateService'], resources: ['*'] })
+    );
+    scaleServiceFn.addToRolePolicy(
+      new iam.PolicyStatement({ actions: ['application-autoscaling:RegisterScalableTarget'], resources: ['*'] })
+    );
 
     const onEvent = new lambda.Function(this, 'MigrateOnEventFn', {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -326,21 +345,11 @@ def handler(event, context):
         raise Exception('Failed to start migration task: ' + json.dumps(resp, default=str))
     task_arn = tasks[0]['taskArn']
     return {'PhysicalResourceId': task_arn, 'Data': {'taskArn': task_arn}}
-      `),
+      `)
     });
 
-    onEvent.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['ecs:RunTask'],
-        resources: ['*'],
-      })
-    );
-    onEvent.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['iam:PassRole'],
-        resources: [taskExecutionRoleArn, taskRoleArn],
-      })
-    );
+    onEvent.addToRolePolicy(new iam.PolicyStatement({ actions: ['ecs:RunTask'], resources: ['*'] }));
+    onEvent.addToRolePolicy(new iam.PolicyStatement({ actions: ['iam:PassRole'], resources: [taskExecutionRoleArn, taskRoleArn] }));
 
     const isComplete = new lambda.Function(this, 'MigrateIsCompleteFn', {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -366,100 +375,75 @@ def handler(event, context):
     if exit_code != 0:
         raise Exception(f'Migration task failed with exit code {exit_code}')
     return {'IsComplete': True}
-      `),
+      `)
     });
-    isComplete.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['ecs:DescribeTasks'],
-        resources: ['*'],
-      })
-    );
+
+    isComplete.addToRolePolicy(new iam.PolicyStatement({ actions: ['ecs:DescribeTasks'], resources: ['*'] }));
 
     const provider = new cr.Provider(this, 'MigrationProvider', {
       onEventHandler: onEvent,
       isCompleteHandler: isComplete,
       totalTimeout: Duration.minutes(30),
       queryInterval: Duration.seconds(15),
-      logRetention: logs.RetentionDays.ONE_WEEK,
+      logRetention: logs.RetentionDays.ONE_WEEK
     });
 
     const runSubnets = vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC });
     const runSecurityGroups = [serviceSg.securityGroupId];
 
-    const runMigrationsCR =
-      runMigrations
-        ? new cdk.CustomResource(this, 'RunMigrations', {
-            serviceToken: provider.serviceToken,
-            properties: {
-              clusterArn: cluster.clusterArn,
-              taskDefinitionArn: migrationTask.taskDefinitionArn,
-              subnets: runSubnets.subnetIds,
-              securityGroups: runSecurityGroups,
-              assignPublicIp: 'ENABLED',
-            },
-            resourceType: 'Custom::RunDbMigrations',
-          })
-        : undefined;
+    const scaleToZeroCR = runMigrations
+      ? new cdk.CustomResource(this, 'ScaleServiceToZero', {
+          serviceToken: scaleServiceFn.functionArn,
+          properties: {
+            clusterArn: cluster.clusterArn,
+            clusterName: cluster.clusterName,
+            serviceName: svc.service.serviceName,
+            desiredCount: 0,
+            minCapacity: 0,
+            maxCapacity: props.maxCapacity
+          },
+          resourceType: 'Custom::ScaleServiceToZero'
+        })
+      : undefined;
+
+    if (scaleToZeroCR) {
+      scaleToZeroCR.node.addDependency(svc.service);
+    }
+
+    const runMigrationsCR = runMigrations
+      ? new cdk.CustomResource(this, 'RunMigrations', {
+          serviceToken: provider.serviceToken,
+          properties: {
+            clusterArn: cluster.clusterArn,
+            taskDefinitionArn: migrationTask.taskDefinitionArn,
+            subnets: runSubnets.subnetIds,
+            securityGroups: runSecurityGroups,
+            assignPublicIp: 'ENABLED'
+          },
+          resourceType: 'Custom::RunDbMigrations'
+        })
+      : undefined;
 
     if (runMigrationsCR) {
       runMigrationsCR.node.addDependency(db);
       runMigrationsCR.node.addDependency(redis);
-      runMigrationsCR.node.addDependency(svc.service);
+      if (scaleToZeroCR) runMigrationsCR.node.addDependency(scaleToZeroCR);
     }
 
-    const scaleUpFn = new lambda.Function(this, 'ScaleUpServiceFn', {
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'index.handler',
-      timeout: Duration.minutes(5),
-      code: lambda.Code.fromInline(`
-import boto3
-ecs = boto3.client('ecs')
-aas = boto3.client('application-autoscaling')
-def handler(event, context):
-    if event.get('RequestType','Create') == 'Delete':
-        return {'PhysicalResourceId': 'scale-up'}
-    p = event['ResourceProperties']
-    ecs.update_service(cluster=p['clusterArn'], service=p['serviceName'], desiredCount=int(p['desiredCount']))
-    aas.register_scalable_target(
-        ServiceNamespace='ecs',
-        ResourceId=f"service/{p['clusterName']}/{p['serviceName']}",
-        ScalableDimension='ecs:service:DesiredCount',
-        MinCapacity=int(p['minCapacity']),
-        MaxCapacity=int(p['maxCapacity']),
-        SuspendedState={'DynamicScalingInSuspended': False, 'DynamicScalingOutSuspended': False, 'ScheduledScalingSuspended': False}
-    )
-    return {'PhysicalResourceId': 'scale-up'}
-      `),
-    });
-
-    scaleUpFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['ecs:UpdateService'],
-        resources: ['*'],
-      })
-    );
-    scaleUpFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ['application-autoscaling:RegisterScalableTarget'],
-        resources: ['*'],
-      })
-    );
-
-    const scaleUpCR =
-      runMigrations
-        ? new cdk.CustomResource(this, 'ScaleUpAfterMigrations', {
-            serviceToken: scaleUpFn.functionArn,
-            properties: {
-              clusterArn: cluster.clusterArn,
-              clusterName: cluster.clusterName,
-              serviceName: svc.service.serviceName,
-              desiredCount: props.desiredCount,
-              minCapacity: props.minCapacity,
-              maxCapacity: props.maxCapacity,
-            },
-            resourceType: 'Custom::ScaleUpService',
-          })
-        : undefined;
+    const scaleUpCR = runMigrations
+      ? new cdk.CustomResource(this, 'ScaleUpAfterMigrations', {
+          serviceToken: scaleServiceFn.functionArn,
+          properties: {
+            clusterArn: cluster.clusterArn,
+            clusterName: cluster.clusterName,
+            serviceName: svc.service.serviceName,
+            desiredCount: props.desiredCount,
+            minCapacity: props.minCapacity,
+            maxCapacity: props.maxCapacity
+          },
+          resourceType: 'Custom::ScaleUpService'
+        })
+      : undefined;
 
     if (scaleUpCR && runMigrationsCR) {
       scaleUpCR.node.addDependency(runMigrationsCR);
