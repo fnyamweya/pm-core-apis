@@ -2,32 +2,44 @@ import { Server } from 'http';
 import 'reflect-metadata';
 import app from './app';
 import databaseInstance from './config/database';
-// import { elasticsearchManager } from './config/elasticsearch';
+import { redisManager } from './config/redis';
 import { currentEnvironment } from './config/env';
-// import {
-//   AuditTrailService,
-//   createAuditTrailService,
-// } from './services/auditTrail/auditTrailService';
 import { logger } from './utils/logger';
 import { initializeSecrets, createEnvConfiguration } from './config/env';
 
-const port = process.env.PORT || 5000;
+const port = Number(process.env.PORT || 5000);
+
 let server: Server | null = null;
-// let auditTrailService: AuditTrailService | null = null;
+let shuttingDown = false;
+let shutdownPromise: Promise<void> | null = null;
 
-// Graceful shutdown logic
-const gracefulShutdown = async (options: { exit?: boolean } = {}) => {
-  if (server) {
-    const timeout = setTimeout(() => {
+const gracefulShutdown = (reason: string, exitCode = 0) => {
+  if (shuttingDown) return shutdownPromise ?? Promise.resolve();
+  shuttingDown = true;
+
+  logger.info(`${reason} received`);
+
+  shutdownPromise = new Promise<void>((resolve) => {
+    const forceTimeout = setTimeout(async () => {
       logger.warn('Forcing shutdown due to timeout');
+      try { await databaseInstance.close(); } catch {}
+      try { await redisManager.close(); } catch {}
       process.exit(1);
-    }, 10000); // Timeout to force shutdown after 10 seconds
+    }, 10_000);
 
-    server.close(async () => {
-      clearTimeout(timeout);
+    const closeServer = async () => {
+      if (!server) return;
+      await new Promise<void>((res) => server!.close(() => res()));
       logger.info('Server closed');
+    };
 
-      // Close database connection
+    (async () => {
+      try {
+        await closeServer();
+      } catch (e) {
+        logger.error('Error closing HTTP server:', e);
+      }
+
       try {
         await databaseInstance.close();
         logger.info('Database connection closed');
@@ -35,92 +47,62 @@ const gracefulShutdown = async (options: { exit?: boolean } = {}) => {
         logger.error('Error closing database connection:', dbError);
       }
 
-      // Clean up audit trail indices if needed
-      // try {
-      //   if (auditTrailService) {
-      //     await auditTrailService.cleanup();
-      //     logger.info('Audit trail cleanup completed');
-      //   }
-      // } catch (auditError) {
-      //   logger.error('Error cleaning up audit trail:', auditError);
-      // }
+      try {
+        await redisManager.close();
+        logger.info('Redis connections closed');
+      } catch (rError) {
+        logger.error('Error closing Redis connections:', rError);
+      }
 
-      // Close Elasticsearch connection
-      // try {
-      //   await elasticsearchManager.close();
-      //   logger.info('Elasticsearch client connection closed');
-      // } catch (esError) {
-      //   logger.error('Error closing Elasticsearch client:', esError);
-      // }
-
-      if (options.exit) process.exit();
+      clearTimeout(forceTimeout);
+      resolve();
+      process.exit(exitCode);
+    })().catch((e) => {
+      logger.error('Unexpected error during shutdown:', e);
+      clearTimeout(forceTimeout);
+      process.exit(1);
     });
-  } else if (options.exit) {
-    process.exit(1);
-  }
+  });
+
+  return shutdownPromise;
 };
 
-// Start the server and initialize the database and Elasticsearch
 const startServer = async () => {
   try {
     await initializeSecrets();
     const envConfiguration = createEnvConfiguration();
     logger.info('Environment configuration:', envConfiguration);
 
-    // Initialize the database connection
     await databaseInstance.initialize();
     logger.info('Database has been initialized!');
 
-    // Initialize Elasticsearch client
-    // await elasticsearchManager.initialize();
-    // logger.info('Elasticsearch client has been initialized!');
-
-    // Initialize Audit Trail Service
-    // auditTrailService = createAuditTrailService(
-    //   elasticsearchManager.getClient(),
-    //   {
-    //     index: process.env.AUDIT_TRAIL_INDEX || 'audit-trail',
-    //     retentionDays: process.env.AUDIT_TRAIL_RETENTION_DAYS
-    //       ? parseInt(process.env.AUDIT_TRAIL_RETENTION_DAYS, 10)
-    //       : 90,
-    //   }
-    // );
-    // await auditTrailService.initialize();
-    // logger.info('Audit Trail Service has been initialized!');
-
-    // Make audit trail service available throughout the application
-    // app.locals.auditTrailService = auditTrailService;
-
-    // Start the Express server
     server = app.listen(port, () => {
-      logger.info(
-        `Server started on port ${port} in ${currentEnvironment} mode.`
-      );
+      logger.info(`Server started on port ${port} in ${currentEnvironment} mode.`);
     });
-    server.timeout = 10000; // Set server timeout to 10 seconds
+
+    (server as any).timeout = 10_000;
   } catch (error) {
     logger.error('Failed to start the server:', error);
-    process.exit(1); // Exit the process if the server fails to start
+    process.exit(1);
   }
 };
 
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
+process.once('uncaughtException', (error) => {
   logger.error(`Uncaught Exception: ${error.message}`, error);
-  gracefulShutdown({ exit: true });
+  void gracefulShutdown('uncaughtException', 1);
 });
 
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (reason) => {
+process.once('unhandledRejection', (reason) => {
   logger.error('Unhandled Rejection:', reason);
-  gracefulShutdown({ exit: true });
+  void gracefulShutdown('unhandledRejection', 1);
 });
 
-// Handle SIGTERM for graceful shutdown (e.g., from Docker, Kubernetes)
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received');
-  gracefulShutdown({ exit: true });
+process.once('SIGTERM', () => {
+  void gracefulShutdown('SIGTERM', 0);
 });
 
-// Start the server
-startServer();
+process.once('SIGINT', () => {
+  void gracefulShutdown('SIGINT', 0);
+});
+
+void startServer();

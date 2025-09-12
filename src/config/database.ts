@@ -1,12 +1,11 @@
 import { readdir } from 'fs/promises';
-import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { DataSource, DataSourceOptions } from 'typeorm';
 import { logger } from '../utils/logger';
 import {
   EnvConfiguration,
   isDevelopmentEnvironment,
-  isProductionEnvironment
+  isProductionEnvironment,
 } from './env';
 
 type CustomDatabaseConfig = {
@@ -23,73 +22,6 @@ type CustomDatabaseConfig = {
   };
 };
 
-function detectRuntimeExt() {
-  const isJs = __filename.endsWith('.js');
-  return { ext: isJs ? 'js' : 'ts' };
-}
-
-function looksLikeRemote(host?: string) {
-  if (!host) return false;
-  const h = host.toLowerCase();
-  return (
-    h === 'localhost' ||
-    h === '127.0.0.1' ||
-    h.endsWith('.local')
-  ) ? false : true;
-}
-
-function looksLikeRds(host?: string) {
-  if (!host) return false;
-  const h = host.toLowerCase();
-  return h.includes('.rds.amazonaws.com');
-}
-
-/**
- * Build SSL options for pg/TypeORM:
- * - If DB_SSL is explicitly provided, honor it.
- * - Otherwise, auto-enable SSL for RDS or any non-local host.
- * - In prod, default rejectUnauthorized=true unless you override.
- */
-function buildSslOption(dbHost?: string): boolean | Record<string, any> | undefined {
-  const explicit = EnvConfiguration.DB_SSL;
-  const shouldUseSsl =
-    explicit !== undefined
-      ? String(explicit) === 'true'
-      : (looksLikeRds(dbHost) || looksLikeRemote(dbHost)); // auto-on for remote/RDS
-
-  if (!shouldUseSsl) return undefined;
-
-  const rejectUnauthorized =
-    String(
-      EnvConfiguration.DB_SSL_REJECT_UNAUTHORIZED ??
-        (isProductionEnvironment ? 'true' : 'false')
-    ) === 'true';
-
-  const caPath = EnvConfiguration.DB_SSL_CA;
-  if (caPath && existsSync(caPath)) {
-    try {
-      const ca = readFileSync(caPath, 'utf8');
-      return { ca, rejectUnauthorized };
-    } catch (err) {
-      logger.warn(
-        `Failed to read DB_SSL_CA at ${caPath}; falling back to rejectUnauthorized=${rejectUnauthorized}`,
-        err
-      );
-      return { rejectUnauthorized };
-    }
-  }
-  return { rejectUnauthorized };
-}
-
-function getPgPoolExtra(cfg: CustomDatabaseConfig['poolConfig']) {
-  return {
-    max: cfg.max,
-    idleTimeoutMillis: cfg.idleTimeoutMillis,
-    connectionTimeoutMillis: cfg.acquireTimeoutMillis,
-    application_name: EnvConfiguration.APP_NAME ?? 'tunda-apis'
-  };
-}
-
 export const AppDataSource = new DataSource({
   type: 'postgres',
   host: EnvConfiguration.DB_HOST || 'localhost',
@@ -99,82 +31,86 @@ export const AppDataSource = new DataSource({
   database: EnvConfiguration.DB_NAME || 'testdb',
   synchronize: isDevelopmentEnvironment && Boolean(EnvConfiguration.DB_SYNCHRONIZE),
   logging: Boolean(EnvConfiguration.DB_LOGGING),
-  entities: [join(__dirname, `../entities/**/*.${detectRuntimeExt().ext}`)],
-  migrations: [join(__dirname, `../migrations/*.${detectRuntimeExt().ext}`)],
-  ssl: buildSslOption(EnvConfiguration.DB_HOST) as any
+  entities: [join(__dirname, '../entities/**/*.ts')],
+  migrations: [join(__dirname, '../migrations/*.ts')],
+  ssl: isProductionEnvironment ? { rejectUnauthorized: false } : undefined,
 });
 
 class Database {
   private static instance: Database;
   private dataSource: DataSource | null = null;
   private initializationPromise: Promise<DataSource> | null = null;
+  private closingPromise: Promise<void> | null = null;
+  private closed = false;
 
   private constructor() {}
 
   public static getInstance(): Database {
-    if (!Database.instance) Database.instance = new Database();
+    if (!Database.instance) {
+      Database.instance = new Database();
+    }
     return Database.instance;
   }
 
   private async getFilePaths(directory: string, extension: string): Promise<string[]> {
     const entries = await readdir(directory, { withFileTypes: true });
-    const nested = await Promise.all(
+    const paths = await Promise.all(
       entries.map((entry) => {
         const fullPath = join(directory, entry.name);
-        return entry.isDirectory() ? this.getFilePaths(fullPath, extension) : [fullPath];
+        return entry.isDirectory()
+          ? this.getFilePaths(fullPath, extension)
+          : [fullPath];
       })
     );
-    return nested.flat().filter((p) => p.endsWith(extension));
+    return paths.flat().filter((p) => p.endsWith(extension));
   }
 
   private getPoolConfig(): CustomDatabaseConfig['poolConfig'] {
     return {
       max: Number(EnvConfiguration.DB_POOL_MAX) || 10,
       min: Number(EnvConfiguration.DB_POOL_MIN) || 1,
-      idleTimeoutMillis: Number(EnvConfiguration.DB_POOL_IDLE_TIMEOUT) || 30_000,
-      acquireTimeoutMillis: Number(EnvConfiguration.DB_POOL_ACQUIRE_TIMEOUT) || 60_000,
-      reapIntervalMillis: Number(EnvConfiguration.DB_POOL_REAP_INTERVAL) || 1_000,
-      createTimeoutMillis: Number(EnvConfiguration.DB_POOL_CREATE_TIMEOUT) || 30_000,
-      createRetryIntervalMillis: Number(EnvConfiguration.DB_POOL_CREATE_RETRY_INTERVAL) || 1_000
+      idleTimeoutMillis: Number(EnvConfiguration.DB_POOL_IDLE_TIMEOUT) || 30000,
+      acquireTimeoutMillis: Number(EnvConfiguration.DB_POOL_ACQUIRE_TIMEOUT) || 60000,
+      reapIntervalMillis: Number(EnvConfiguration.DB_POOL_REAP_INTERVAL) || 1000,
+      createTimeoutMillis: Number(EnvConfiguration.DB_POOL_CREATE_TIMEOUT) || 30000,
+      createRetryIntervalMillis:
+        Number(EnvConfiguration.DB_POOL_CREATE_RETRY_INTERVAL) || 1000,
     };
   }
 
   private async getDatabaseConfig(): Promise<DataSourceOptions> {
     const isSandbox = EnvConfiguration.NODE_ENV === 'sandbox';
-    const { ext } = detectRuntimeExt();
-    const poolCfg = this.getPoolConfig();
-
-    const host = isSandbox ? (EnvConfiguration.SANDBOX_DB_HOST || 'localhost') : (EnvConfiguration.DB_HOST || 'localhost');
-    const port = Number(isSandbox ? EnvConfiguration.SANDBOX_DB_PORT : EnvConfiguration.DB_PORT) || 5432;
-    const username = isSandbox ? (EnvConfiguration.SANDBOX_DB_USER || 'sandbox_user') : (EnvConfiguration.DB_USER || 'testuser');
-    const password = isSandbox ? (EnvConfiguration.SANDBOX_DB_PASSWORD || 'sandbox_password') : (EnvConfiguration.DB_PASSWORD || 'testpassword');
-    const database = isSandbox ? (EnvConfiguration.SANDBOX_DB_NAME || 'sandbox_db') : (EnvConfiguration.DB_NAME || 'testdb');
-
-    const ssl = buildSslOption(host);
-
-    logger.info(
-      `DB config → host=${host} port=${port} db=${database} user=${username} ssl=${!!ssl} rejectUnauthorized=${
-        (ssl && typeof ssl === 'object' ? (ssl as any).rejectUnauthorized : false)
-      }`
-    );
 
     return {
       type: 'postgres',
-      host,
-      port,
-      username,
-      password,
-      database,
+      host: isSandbox
+        ? EnvConfiguration.SANDBOX_DB_HOST || 'localhost'
+        : EnvConfiguration.DB_HOST || 'localhost',
+      port:
+        Number(isSandbox ? EnvConfiguration.SANDBOX_DB_PORT : EnvConfiguration.DB_PORT) ||
+        5432,
+      username: isSandbox
+        ? EnvConfiguration.SANDBOX_DB_USER || 'sandbox_user'
+        : EnvConfiguration.DB_USER || 'testuser',
+      password: isSandbox
+        ? EnvConfiguration.SANDBOX_DB_PASSWORD || 'sandbox_password'
+        : EnvConfiguration.DB_PASSWORD || 'testpassword',
+      database: isSandbox
+        ? EnvConfiguration.SANDBOX_DB_NAME || 'sandbox_db'
+        : EnvConfiguration.DB_NAME || 'testdb',
       synchronize: isDevelopmentEnvironment && Boolean(EnvConfiguration.DB_SYNCHRONIZE),
       logging: Boolean(EnvConfiguration.DB_LOGGING),
-      entities: [join(__dirname, `../entities/**/*..${ext}`.replace('..', ''))], // safe join
-      migrations: [join(__dirname, `../migrations/*.${ext}`)],
-      ssl: ssl as any,
-      extra: getPgPoolExtra(poolCfg)
+      entities: await this.getFilePaths(join(__dirname, '../entities'), '.ts'),
+      migrations: await this.getFilePaths(join(__dirname, '../migrations'), '.ts'),
+      ssl: isProductionEnvironment ? { rejectUnauthorized: false } : undefined,
     };
   }
 
-  private async retryOperation<T>(operation: () => Promise<T>, attempts: number, delay: number): Promise<T> {
+  private async retryOperation<T>(
+    operation: () => Promise<T>,
+    attempts: number,
+    delay: number
+  ): Promise<T> {
     for (let i = 0; i < attempts; i++) {
       try {
         return await operation();
@@ -188,10 +124,12 @@ class Database {
   }
 
   public async initialize(): Promise<DataSource> {
-    if (this.dataSource && this.dataSource.isInitialized) {
+    if (this.dataSource?.isInitialized) {
       logger.debug('DataSource is already initialized.');
+      this.closed = false;
       return this.dataSource;
     }
+
     if (!this.initializationPromise) {
       logger.debug('Initializing new DataSource...');
       this.initializationPromise = this.retryOperation(
@@ -201,12 +139,14 @@ class Database {
           await this.dataSource.initialize();
           logger.info('Data Source has been initialized!');
           await this.runMigrations();
+          this.closed = false;
           return this.dataSource;
         },
         Number(EnvConfiguration.DB_RETRY_ATTEMPTS) || 3,
         Number(EnvConfiguration.DB_RETRY_DELAY) || 1000
       );
     }
+
     return this.initializationPromise;
   }
 
@@ -215,18 +155,15 @@ class Database {
       logger.error('Cannot run migrations. DataSource is not initialized.');
       return;
     }
+
     const migrationsDir = join(__dirname, '../migrations');
     try {
-      if (!existsSync(migrationsDir)) {
-        logger.warn(`Migrations directory ${migrationsDir} does not exist. Skipping migrations.`);
-        return;
-      }
       await readdir(migrationsDir);
       await this.dataSource.runMigrations();
       logger.info('Migrations have been successfully run.');
     } catch (error: unknown) {
       const err = error as NodeJS.ErrnoException;
-      if (err && err.code === 'ENOENT') {
+      if (err?.code === 'ENOENT') {
         logger.warn(`Migrations directory ${migrationsDir} does not exist. Skipping migrations.`);
       } else {
         logger.error('Error running migrations:', err);
@@ -236,22 +173,46 @@ class Database {
   }
 
   public async close(): Promise<void> {
-    if (this.dataSource && this.dataSource.isInitialized) {
-      try {
-        await this.dataSource.destroy();
+    if (this.closed) {
+      logger.debug('Data Source already closed.');
+      return;
+    }
+    if (this.closingPromise) {
+      await this.closingPromise;
+      return;
+    }
+    if (!this.dataSource || !this.dataSource.isInitialized) {
+      this.closed = true;
+      return;
+    }
+
+    this.closingPromise = this.dataSource
+      .destroy()
+      .then(() => {
         logger.info('Data Source has been closed.');
-      } catch (err: unknown) {
+      })
+      .catch((err: unknown) => {
+        const msg = (err as Error)?.message || '';
+        if (msg.includes('Called end on pool more than once')) {
+          logger.warn('Pool already ended; ignoring duplicate close.');
+          return;
+        }
         logger.error('Error during Data Source closing', err);
         throw err;
-      }
-    }
+      })
+      .finally(() => {
+        this.dataSource = null;
+        this.initializationPromise = null;
+        this.closingPromise = null;
+        this.closed = true;
+      });
+
+    await this.closingPromise;
   }
 
   public async healthCheck(): Promise<boolean> {
     try {
-      if (!this.dataSource || !this.dataSource.isInitialized) {
-        throw new Error('DataSource is not initialized');
-      }
+      if (!this.dataSource?.isInitialized) throw new Error('DataSource is not initialized');
       await this.dataSource.query('SELECT 1');
       return true;
     } catch (err: unknown) {
@@ -265,34 +226,22 @@ class Database {
     idleCount: number;
     waitingCount: number;
   }> {
-    if (!this.dataSource || !this.dataSource.isInitialized) {
+    if (!this.dataSource?.isInitialized) {
       throw new Error('DataSource is not initialized');
     }
-    const driver: any = this.dataSource.driver as any;
-    const pool = driver?.master?.pool ?? driver?.pool;
+    const pool = (this.dataSource.driver as any).master;
     return {
-      totalCount: pool?.totalCount ?? 0,
-      idleCount: pool?.idleCount ?? 0,
-      waitingCount: pool?.waitingCount ?? 0
+      totalCount: pool.totalCount,
+      idleCount: pool.idleCount,
+      waitingCount: pool.waitingCount,
     };
   }
 
   public async getDataSource(): Promise<DataSource> {
-    if (this.dataSource && this.dataSource.isInitialized) {
-      return this.dataSource;
-    }
+    if (this.dataSource?.isInitialized) return this.dataSource;
     return this.initialize();
   }
 }
-
-const gracefulShutdown = async (signal: string) => {
-  logger.info(`${signal} received. Closing database connection...`);
-  await Database.getInstance().close();
-  process.exit(0);
-};
-
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 const databaseInstance = Database.getInstance();
 export default databaseInstance;
