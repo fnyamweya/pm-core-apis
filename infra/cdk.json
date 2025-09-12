@@ -1,5 +1,5 @@
 {
-  "app": "npx ts-node --transpile-only bin/app.ts",
+  "app": "npx ts-node --project tsconfig.json --transpile-only bin/app.ts",
   "context": {
     "@aws-cdk/core:newStyleStackSynthesis": true
   }
