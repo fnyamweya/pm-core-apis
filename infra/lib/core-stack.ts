@@ -65,7 +65,7 @@ export class CoreStack extends Stack {
     dbSg.addIngressRule(serviceSg, ec2.Port.tcp(5432));
 
     const engine = rds.DatabaseInstanceEngine.postgres({
-      version: rds.PostgresEngineVersion.of('17.5', '17')
+      version: rds.PostgresEngineVersion.of('16.3', '16')
     });
     const instanceType = ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MICRO);
 
