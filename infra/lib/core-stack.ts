@@ -13,7 +13,7 @@ import {
   aws_rds as rds,
   aws_secretsmanager as secrets,
   aws_applicationautoscaling as appscaling,
-  aws_elasticache as elasticache
+  aws_elasticache as elasticache,
 } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { resolve } from 'path';
@@ -48,19 +48,28 @@ export class CoreStack extends Stack {
       maxAzs: 2,
       subnetConfiguration: [
         { name: 'public', subnetType: ec2.SubnetType.PUBLIC, cidrMask: 24 },
-        { name: 'isolated', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 }
-      ]
+        { name: 'isolated', subnetType: ec2.SubnetType.PRIVATE_ISOLATED, cidrMask: 24 },
+      ],
     });
 
     const albSg = new ec2.SecurityGroup(this, 'AlbSg', { vpc, allowAllOutbound: true });
     albSg.addIngressRule(ec2.Peer.anyIpv4(), ec2.Port.tcp(80));
     const serviceSg = new ec2.SecurityGroup(this, 'ServiceSg', { vpc, allowAllOutbound: true });
+
     const dbSg = new ec2.SecurityGroup(this, 'DbSg', { vpc, allowAllOutbound: false });
     dbSg.addIngressRule(serviceSg, ec2.Port.tcp(5432));
 
     const engine = rds.DatabaseInstanceEngine.postgres({
-      version: rds.PostgresEngineVersion.VER_16_3
+      version: rds.PostgresEngineVersion.of('16.3', '16'),
     });
+
+    const pgParams = new rds.ParameterGroup(this, 'PgParams', {
+      engine,
+      parameters: {
+        'rds.force_ssl': '1',
+      },
+    });
+
     const instanceType = ec2.InstanceType.of(ec2.InstanceClass.T4G, ec2.InstanceSize.MICRO);
 
     const db = new rds.DatabaseInstance(this, 'Postgres', {
@@ -68,6 +77,7 @@ export class CoreStack extends Stack {
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       securityGroups: [dbSg],
       engine,
+      parameterGroup: pgParams,
       instanceType,
       allocatedStorage: 20,
       maxAllocatedStorage: 100,
@@ -80,9 +90,9 @@ export class CoreStack extends Stack {
       removalPolicy: isProd ? RemovalPolicy.SNAPSHOT : RemovalPolicy.DESTROY,
       deleteAutomatedBackups: !isProd,
       credentials: rds.Credentials.fromGeneratedSecret('postgres', {
-        secretName: `${name}/db-credentials`
+        secretName: `${name}/db-credentials`,
       }),
-      databaseName: 'app'
+      databaseName: 'app',
     });
 
     const secretFields: Record<string, SecretValue> = {};
@@ -94,19 +104,19 @@ export class CoreStack extends Stack {
       Object.keys(secretFields).length > 0
         ? new secrets.Secret(this, 'AppSecrets', {
             secretName: `${name}/app-secrets`,
-            secretObjectValue: secretFields
+            secretObjectValue: secretFields,
           })
         : undefined;
 
     const cluster = new ecs.Cluster(this, 'Cluster', {
       vpc,
       clusterName: `${name}-cluster`,
-      containerInsights: true
+      containerInsights: true,
     });
 
     const logGroup = new logs.LogGroup(this, 'Logs', {
       logGroupName: `/ecs/${props.appName}/${props.envName}`,
-      retention: logs.RetentionDays.ONE_MONTH
+      retention: logs.RetentionDays.ONE_MONTH,
     });
 
     let image: ecs.ContainerImage;
@@ -127,8 +137,8 @@ export class CoreStack extends Stack {
           '**/node_modules/**',
           '*.md',
           'README*',
-          'LICENSE*'
-        ]
+          'LICENSE*',
+        ],
       });
     } else {
       const repoName = props.ecrRepositoryName ?? `${props.appName}-${props.envName}`;
@@ -136,10 +146,6 @@ export class CoreStack extends Stack {
       image = ecs.ContainerImage.fromEcrRepository(repo, props.imageTag ?? 'latest');
     }
 
-    /**
-     * Optional Redis (ElastiCache) — to prevent localhost attempts in ECS.
-     * Cheapest: single-node cache.t4g.micro, no encryption/auth, isolated subnets.
-     */
     const redisSg = new ec2.SecurityGroup(this, 'RedisSg', { vpc, allowAllOutbound: true });
     redisSg.addIngressRule(serviceSg, ec2.Port.tcp(6379));
 
@@ -148,7 +154,7 @@ export class CoreStack extends Stack {
     const redisSubnetGroup = new elasticache.CfnSubnetGroup(this, 'RedisSubnetGroup', {
       cacheSubnetGroupName: `${name}-redis-subnets`,
       description: `${name} redis subnets`,
-      subnetIds: redisSubnets.subnetIds
+      subnetIds: redisSubnets.subnetIds,
     });
 
     const redis = new elasticache.CfnReplicationGroup(this, 'Redis', {
@@ -163,9 +169,10 @@ export class CoreStack extends Stack {
       cacheSubnetGroupName: redisSubnetGroup.cacheSubnetGroupName!,
       securityGroupIds: [redisSg.securityGroupId],
       atRestEncryptionEnabled: false,
-      transitEncryptionEnabled: false
+      transitEncryptionEnabled: false,
     });
     redis.addDependency(redisSubnetGroup);
+    if (!isProd) redis.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
     const redisHost = redis.attrPrimaryEndPointAddress;
     const redisPort = redis.attrPrimaryEndPointPort || '6379';
@@ -173,14 +180,18 @@ export class CoreStack extends Stack {
     const baseEnv: Record<string, string> = {
       NODE_ENV: props.envName,
       PORT: String(props.containerPort),
+
       DB_HOST: db.instanceEndpoint.hostname,
       DB_PORT: '5432',
       DB_NAME: 'app',
       DB_USER: 'postgres',
+
+      DB_SSL: 'true',
+      DB_SSL_REJECT_UNAUTHORIZED: isProd ? 'true' : 'false',
+
       REDIS_ENABLED: 'true',
       REDIS_HOST: redisHost,
-      REDIS_PORT: redisPort
-      // note: no REDIS_PASSWORD (ElastiCache default is no AUTH)
+      REDIS_PORT: redisPort,
     };
 
     const mergedEnv = { ...baseEnv, ...(props.appConfig ?? {}) };
@@ -199,7 +210,7 @@ export class CoreStack extends Stack {
       capacityProviderStrategies: props.enableFargateSpot
         ? [
             { capacityProvider: 'FARGATE_SPOT', weight: 1 },
-            { capacityProvider: 'FARGATE', weight: 1 }
+            { capacityProvider: 'FARGATE', weight: 1 },
           ]
         : undefined,
       securityGroups: [serviceSg],
@@ -214,11 +225,14 @@ export class CoreStack extends Stack {
           DB_PASSWORD: ecs.Secret.fromSecretsManager(db.secret!, 'password'),
           ...(appSecrets
             ? Object.fromEntries(
-                Object.keys(props.appSecrets ?? {}).map((k) => [k, ecs.Secret.fromSecretsManager(appSecrets!, k)])
+                Object.keys(props.appSecrets ?? {}).map((k) => [
+                  k,
+                  ecs.Secret.fromSecretsManager(appSecrets!, k),
+                ]),
               )
-            : {})
-        }
-      }
+            : {}),
+        },
+      },
     });
 
     svc.loadBalancer.addSecurityGroup(albSg);
@@ -230,7 +244,7 @@ export class CoreStack extends Stack {
       healthyThresholdCount: 2,
       unhealthyThresholdCount: 3,
       interval: Duration.seconds(20),
-      timeout: Duration.seconds(5)
+      timeout: Duration.seconds(5),
     });
 
     if (repo) {
@@ -240,23 +254,23 @@ export class CoreStack extends Stack {
 
     const scaling = svc.service.autoScaleTaskCount({
       minCapacity: props.minCapacity,
-      maxCapacity: props.maxCapacity
+      maxCapacity: props.maxCapacity,
     });
 
     scaling.scaleOnCpuUtilization('CpuScaling', {
-      targetUtilizationPercent: isProd ? 60 : 50
+      targetUtilizationPercent: isProd ? 60 : 50,
     });
 
     if (!isProd) {
       scaling.scaleOnSchedule('NightDown', {
         schedule: appscaling.Schedule.cron({ minute: '0', hour: '20' }),
         minCapacity: 0,
-        maxCapacity: Math.max(0, props.minCapacity)
+        maxCapacity: Math.max(0, props.minCapacity),
       });
       scaling.scaleOnSchedule('MorningUp', {
         schedule: appscaling.Schedule.cron({ minute: '0', hour: '6' }),
         minCapacity: Math.max(1, props.desiredCount),
-        maxCapacity: props.maxCapacity
+        maxCapacity: props.maxCapacity,
       });
     }
 

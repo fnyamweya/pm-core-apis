@@ -14,27 +14,56 @@ type CustomDatabaseConfig = {
   retryDelay: number;
   poolConfig: {
     max: number;
-    min: number; // pg ignores this; kept for compatibility
+    min: number;
     idleTimeoutMillis: number;
-    acquireTimeoutMillis: number; // maps to pg: connectionTimeoutMillis
-    reapIntervalMillis: number;   // not used by pg
-    createTimeoutMillis: number;  // not used by pg
-    createRetryIntervalMillis: number; // not used by pg
+    acquireTimeoutMillis: number;
+    reapIntervalMillis: number;
+    createTimeoutMillis: number;
+    createRetryIntervalMillis: number;
   };
 };
 
 function detectRuntimeExt() {
-  // When compiled, this file ends with .js; in dev (ts-node) it ends with .ts
   const isJs = __filename.endsWith('.js');
   return { ext: isJs ? 'js' : 'ts' };
 }
 
-function buildSslOption(): boolean | Record<string, any> | undefined {
-  const useSsl = String(EnvConfiguration.DB_SSL ?? (isProductionEnvironment ? 'true' : 'false')) === 'true';
-  if (!useSsl) return undefined;
+function looksLikeRemote(host?: string) {
+  if (!host) return false;
+  const h = host.toLowerCase();
+  return (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h.endsWith('.local')
+  ) ? false : true;
+}
+
+function looksLikeRds(host?: string) {
+  if (!host) return false;
+  const h = host.toLowerCase();
+  return h.includes('.rds.amazonaws.com');
+}
+
+/**
+ * Build SSL options for pg/TypeORM:
+ * - If DB_SSL is explicitly provided, honor it.
+ * - Otherwise, auto-enable SSL for RDS or any non-local host.
+ * - In prod, default rejectUnauthorized=true unless you override.
+ */
+function buildSslOption(dbHost?: string): boolean | Record<string, any> | undefined {
+  const explicit = EnvConfiguration.DB_SSL;
+  const shouldUseSsl =
+    explicit !== undefined
+      ? String(explicit) === 'true'
+      : (looksLikeRds(dbHost) || looksLikeRemote(dbHost)); // auto-on for remote/RDS
+
+  if (!shouldUseSsl) return undefined;
 
   const rejectUnauthorized =
-    String(EnvConfiguration.DB_SSL_REJECT_UNAUTHORIZED ?? (isProductionEnvironment ? 'true' : 'false')) === 'true';
+    String(
+      EnvConfiguration.DB_SSL_REJECT_UNAUTHORIZED ??
+        (isProductionEnvironment ? 'true' : 'false')
+    ) === 'true';
 
   const caPath = EnvConfiguration.DB_SSL_CA;
   if (caPath && existsSync(caPath)) {
@@ -42,7 +71,10 @@ function buildSslOption(): boolean | Record<string, any> | undefined {
       const ca = readFileSync(caPath, 'utf8');
       return { ca, rejectUnauthorized };
     } catch (err) {
-      logger.warn(`Failed to read DB_SSL_CA at ${caPath}; falling back to rejectUnauthorized=${rejectUnauthorized}`, err);
+      logger.warn(
+        `Failed to read DB_SSL_CA at ${caPath}; falling back to rejectUnauthorized=${rejectUnauthorized}`,
+        err
+      );
       return { rejectUnauthorized };
     }
   }
@@ -50,7 +82,6 @@ function buildSslOption(): boolean | Record<string, any> | undefined {
 }
 
 function getPgPoolExtra(cfg: CustomDatabaseConfig['poolConfig']) {
-  // TypeORM -> pg Pool options
   return {
     max: cfg.max,
     idleTimeoutMillis: cfg.idleTimeoutMillis,
@@ -70,7 +101,7 @@ export const AppDataSource = new DataSource({
   logging: Boolean(EnvConfiguration.DB_LOGGING),
   entities: [join(__dirname, `../entities/**/*.${detectRuntimeExt().ext}`)],
   migrations: [join(__dirname, `../migrations/*.${detectRuntimeExt().ext}`)],
-  ssl: buildSslOption() as any
+  ssl: buildSslOption(EnvConfiguration.DB_HOST) as any
 });
 
 class Database {
@@ -81,9 +112,7 @@ class Database {
   private constructor() {}
 
   public static getInstance(): Database {
-    if (!Database.instance) {
-      Database.instance = new Database();
-    }
+    if (!Database.instance) Database.instance = new Database();
     return Database.instance;
   }
 
@@ -101,19 +130,18 @@ class Database {
   private getPoolConfig(): CustomDatabaseConfig['poolConfig'] {
     return {
       max: Number(EnvConfiguration.DB_POOL_MAX) || 10,
-      min: Number(EnvConfiguration.DB_POOL_MIN) || 1, // pg ignores
+      min: Number(EnvConfiguration.DB_POOL_MIN) || 1,
       idleTimeoutMillis: Number(EnvConfiguration.DB_POOL_IDLE_TIMEOUT) || 30_000,
       acquireTimeoutMillis: Number(EnvConfiguration.DB_POOL_ACQUIRE_TIMEOUT) || 60_000,
-      reapIntervalMillis: Number(EnvConfiguration.DB_POOL_REAP_INTERVAL) || 1_000, // ignored
-      createTimeoutMillis: Number(EnvConfiguration.DB_POOL_CREATE_TIMEOUT) || 30_000, // ignored
-      createRetryIntervalMillis: Number(EnvConfiguration.DB_POOL_CREATE_RETRY_INTERVAL) || 1_000 // ignored
+      reapIntervalMillis: Number(EnvConfiguration.DB_POOL_REAP_INTERVAL) || 1_000,
+      createTimeoutMillis: Number(EnvConfiguration.DB_POOL_CREATE_TIMEOUT) || 30_000,
+      createRetryIntervalMillis: Number(EnvConfiguration.DB_POOL_CREATE_RETRY_INTERVAL) || 1_000
     };
   }
 
   private async getDatabaseConfig(): Promise<DataSourceOptions> {
     const isSandbox = EnvConfiguration.NODE_ENV === 'sandbox';
     const { ext } = detectRuntimeExt();
-
     const poolCfg = this.getPoolConfig();
 
     const host = isSandbox ? (EnvConfiguration.SANDBOX_DB_HOST || 'localhost') : (EnvConfiguration.DB_HOST || 'localhost');
@@ -122,9 +150,15 @@ class Database {
     const password = isSandbox ? (EnvConfiguration.SANDBOX_DB_PASSWORD || 'sandbox_password') : (EnvConfiguration.DB_PASSWORD || 'testpassword');
     const database = isSandbox ? (EnvConfiguration.SANDBOX_DB_NAME || 'sandbox_db') : (EnvConfiguration.DB_NAME || 'testdb');
 
-    const ssl = buildSslOption();
+    const ssl = buildSslOption(host);
 
-    const options: DataSourceOptions = {
+    logger.info(
+      `DB config → host=${host} port=${port} db=${database} user=${username} ssl=${!!ssl} rejectUnauthorized=${
+        (ssl && typeof ssl === 'object' ? (ssl as any).rejectUnauthorized : false)
+      }`
+    );
+
+    return {
       type: 'postgres',
       host,
       port,
@@ -133,20 +167,11 @@ class Database {
       database,
       synchronize: isDevelopmentEnvironment && Boolean(EnvConfiguration.DB_SYNCHRONIZE),
       logging: Boolean(EnvConfiguration.DB_LOGGING),
-      entities: [join(__dirname, `../entities/**/*.${ext}`)],
+      entities: [join(__dirname, `../entities/**/*..${ext}`.replace('..', ''))], // safe join
       migrations: [join(__dirname, `../migrations/*.${ext}`)],
       ssl: ssl as any,
       extra: getPgPoolExtra(poolCfg)
     };
-
-    // Helpful log to confirm TLS behavior at runtime
-    logger.info(
-      `DB config → host=${host} port=${port} db=${database} user=${username} ssl=${!!ssl} rejectUnauthorized=${
-        (ssl && typeof ssl === 'object' ? (ssl as any).rejectUnauthorized : false)
-      }`
-    );
-
-    return options;
   }
 
   private async retryOperation<T>(operation: () => Promise<T>, attempts: number, delay: number): Promise<T> {
@@ -167,7 +192,6 @@ class Database {
       logger.debug('DataSource is already initialized.');
       return this.dataSource;
     }
-
     if (!this.initializationPromise) {
       logger.debug('Initializing new DataSource...');
       this.initializationPromise = this.retryOperation(
@@ -183,7 +207,6 @@ class Database {
         Number(EnvConfiguration.DB_RETRY_DELAY) || 1000
       );
     }
-
     return this.initializationPromise;
   }
 
@@ -194,7 +217,6 @@ class Database {
     }
     const migrationsDir = join(__dirname, '../migrations');
     try {
-      // If dir missing, skip gracefully
       if (!existsSync(migrationsDir)) {
         logger.warn(`Migrations directory ${migrationsDir} does not exist. Skipping migrations.`);
         return;
@@ -247,13 +269,12 @@ class Database {
       throw new Error('DataSource is not initialized');
     }
     const driver: any = this.dataSource.driver as any;
-    const pool = driver?.master?.pool ?? driver?.pool; // try both, internal API
+    const pool = driver?.master?.pool ?? driver?.pool;
     return {
       totalCount: pool?.totalCount ?? 0,
       idleCount: pool?.idleCount ?? 0,
       waitingCount: pool?.waitingCount ?? 0
     };
-    // Note: TypeORM doesn't expose pool officially; this is best-effort.
   }
 
   public async getDataSource(): Promise<DataSource> {
