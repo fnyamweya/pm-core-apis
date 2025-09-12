@@ -239,8 +239,8 @@ export class CoreStack extends Stack {
     db.connections.allowDefaultPortFrom(svc.service);
 
     svc.targetGroup.configureHealthCheck({
-      path: '/health',
-      healthyHttpCodes: '200',
+      path: '/api/v1/health',
+      healthyHttpCodes: '200,204',
       healthyThresholdCount: 2,
       unhealthyThresholdCount: 3,
       interval: Duration.seconds(20),
