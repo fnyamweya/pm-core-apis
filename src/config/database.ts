@@ -5,6 +5,7 @@ import { logger } from '../utils/logger';
 import {
   EnvConfiguration,
   isDevelopmentEnvironment,
+  isProductionEnvironment,
 } from './env';
 
 type CustomDatabaseConfig = {
@@ -21,17 +22,31 @@ type CustomDatabaseConfig = {
   };
 };
 
-const isLocalHost = (h?: string) =>
-  !h || h === 'localhost' || h === '127.0.0.1';
+function resolveSslOption():
+  | false
+  | { rejectUnauthorized: boolean } {
+  const raw =
+    (EnvConfiguration.DB_SSLMODE || EnvConfiguration.DB_SSL || '').toString().toLowerCase();
 
-const looksLikeRds = (h?: string) =>
-  !!h && /\.rds\.amazonaws\.com(\.cn)?$/.test(h);
+  // Explicit env takes precedence
+  if (['disable', 'off', 'false', '0', ''].includes(raw)) return false;
+  if (['require', 'true', '1', 'allow', 'prefer'].includes(raw)) {
+    // accept self-signed in non-strict modes
+    return { rejectUnauthorized: false };
+  }
+  if (raw === 'verify-ca' || raw === 'verify-full') {
+    // for real cert chains; set to true to enforce CA validation
+    return { rejectUnauthorized: true };
+  }
 
-// ts in dev, js in prod
-const FILE_EXT = __filename.endsWith('.ts') ? 'ts' : 'js';
-const ENTITIES_GLOB = join(__dirname, `../entities/**/*.${FILE_EXT}`);
-const MIGRATIONS_GLOB = join(__dirname, `../migrations/*.${FILE_EXT}`);
+  // Fallback: prod → relaxed SSL; else → no SSL (avoids local “server does not support SSL”)
+  if (isProductionEnvironment) return { rejectUnauthorized: false };
+  return false;
+}
 
+const sslOption = resolveSslOption();
+
+// Use glob-style patterns so it works in dev (*.ts) and prod (*.js)
 export const AppDataSource = new DataSource({
   type: 'postgres',
   host: EnvConfiguration.DB_HOST || 'localhost',
@@ -41,15 +56,10 @@ export const AppDataSource = new DataSource({
   database: EnvConfiguration.DB_NAME || 'testdb',
   synchronize: isDevelopmentEnvironment && Boolean(EnvConfiguration.DB_SYNCHRONIZE),
   logging: Boolean(EnvConfiguration.DB_LOGGING),
-  entities: [ENTITIES_GLOB],
-  migrations: [MIGRATIONS_GLOB],
-  ssl: (() => {
-    const dbSslEnv = String(EnvConfiguration.DB_SSL || '').toLowerCase();
-    const host = EnvConfiguration.DB_HOST || 'localhost';
-    const requireSsl =
-      dbSslEnv === 'true' || !isLocalHost(host) || looksLikeRds(host);
-    return requireSsl ? { rejectUnauthorized: false } : undefined;
-  })(),
+  entities: [join(__dirname, '..', 'entities', '**', '*.{js,ts}')],
+  migrations: [join(__dirname, '..', 'migrations', '*.{js,ts}')],
+  ssl: sslOption,
+  extra: { ssl: sslOption },
 });
 
 class Database {
@@ -68,26 +78,19 @@ class Database {
     return Database.instance;
   }
 
-  private async getFilePaths(directory: string, extension: string): Promise<string[]> {
-    try {
-      const entries = await readdir(directory, { withFileTypes: true });
-      const paths = await Promise.all(
-        entries.map((entry) => {
-          const fullPath = join(directory, entry.name);
-          return entry.isDirectory()
-            ? this.getFilePaths(fullPath, extension)
-            : [fullPath];
-        })
-      );
-      return paths.flat().filter((p) => p.endsWith(extension));
-    } catch (err: unknown) {
-      const e = err as NodeJS.ErrnoException;
-      if (e?.code === 'ENOENT') {
-        logger.warn(`Directory ${directory} not found. Returning empty list.`);
-        return [];
-      }
-      throw err;
-    }
+  private async getFilePaths(directory: string, extensions: string[]): Promise<string[]> {
+    const entries = await readdir(directory, { withFileTypes: true });
+    const paths = await Promise.all(
+      entries.map((entry) => {
+        const fullPath = join(directory, entry.name);
+        return entry.isDirectory()
+          ? this.getFilePaths(fullPath, extensions)
+          : [fullPath];
+      })
+    );
+    return paths
+      .flat()
+      .filter((p) => extensions.some((ext) => p.endsWith(ext)));
   }
 
   private getPoolConfig(): CustomDatabaseConfig['poolConfig'] {
@@ -106,35 +109,35 @@ class Database {
   private async getDatabaseConfig(): Promise<DataSourceOptions> {
     const isSandbox = EnvConfiguration.NODE_ENV === 'sandbox';
 
-    const host = isSandbox
-      ? (EnvConfiguration.SANDBOX_DB_HOST || 'localhost')
-      : (EnvConfiguration.DB_HOST || 'localhost');
-
-    const dbSslEnv = String(EnvConfiguration.DB_SSL || '').toLowerCase();
-    const requireSsl =
-      dbSslEnv === 'true' || !isLocalHost(host) || looksLikeRds(host);
-    const sslOption = requireSsl ? { rejectUnauthorized: false } : undefined;
+    const common = {
+      type: 'postgres' as const,
+      synchronize: isDevelopmentEnvironment && Boolean(EnvConfiguration.DB_SYNCHRONIZE),
+      logging: Boolean(EnvConfiguration.DB_LOGGING),
+      ssl: sslOption,
+      extra: { ssl: sslOption },
+    };
 
     return {
-      type: 'postgres',
-      host,
+      ...common,
+      host: isSandbox
+        ? EnvConfiguration.SANDBOX_DB_HOST || 'localhost'
+        : EnvConfiguration.DB_HOST || 'localhost',
       port:
         Number(isSandbox ? EnvConfiguration.SANDBOX_DB_PORT : EnvConfiguration.DB_PORT) ||
         5432,
       username: isSandbox
-        ? (EnvConfiguration.SANDBOX_DB_USER || 'sandbox_user')
-        : (EnvConfiguration.DB_USER || 'testuser'),
+        ? EnvConfiguration.SANDBOX_DB_USER || 'sandbox_user'
+        : EnvConfiguration.DB_USER || 'testuser',
       password: isSandbox
-        ? (EnvConfiguration.SANDBOX_DB_PASSWORD || 'sandbox_password')
-        : (EnvConfiguration.DB_PASSWORD || 'testpassword'),
+        ? EnvConfiguration.SANDBOX_DB_PASSWORD || 'sandbox_password'
+        : EnvConfiguration.DB_PASSWORD || 'testpassword',
       database: isSandbox
-        ? (EnvConfiguration.SANDBOX_DB_NAME || 'sandbox_db')
-        : (EnvConfiguration.DB_NAME || 'testdb'),
-      synchronize: isDevelopmentEnvironment && Boolean(EnvConfiguration.DB_SYNCHRONIZE),
-      logging: Boolean(EnvConfiguration.DB_LOGGING),
-      entities: await this.getFilePaths(join(__dirname, '../entities'), `.${FILE_EXT}`),
-      migrations: await this.getFilePaths(join(__dirname, '../migrations'), `.${FILE_EXT}`),
-      ssl: sslOption,
+        ? EnvConfiguration.SANDBOX_DB_NAME || 'sandbox_db'
+        : EnvConfiguration.DB_NAME || 'testdb',
+      // prefer explicit file lists at runtime
+      entities: await this.getFilePaths(join(__dirname, '../entities'), ['.js', '.ts']),
+      migrations: await this.getFilePaths(join(__dirname, '../migrations'), ['.js', '.ts']),
+      type: 'postgres', // Ensure type is always present and correct
     };
   }
 

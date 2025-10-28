@@ -147,6 +147,18 @@ class PropertyLeaseAgreementController extends BaseController<PropertyLeaseAgree
     }
   }
 
+  /** GET /leases/:id/schedule */
+  public async getLeaseSchedulePreview(req: Request, res: Response): Promise<void> {
+    const { id } = req.params;
+    logger.info('Fetching lease schedule preview', { leaseId: id });
+    try {
+      const schedule = await propertyLeaseAgreementService.getLeaseSchedule(id);
+      this.sendSuccess(req, res, { leaseId: id, schedule }, 'Lease schedule preview retrieved successfully');
+    } catch (error) {
+      this.handleError(error as any, req, res);
+    }
+  }
+
   /** GET /properties/:propertyId/leases/rent-roll?month=YYYY-MM */
   public async getPropertyRentRoll(req: Request, res: Response): Promise<void> {
     const { propertyId } = req.params;

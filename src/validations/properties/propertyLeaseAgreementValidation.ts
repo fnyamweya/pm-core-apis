@@ -1,6 +1,33 @@
 import Joi from 'joi';
 import { LeaseStatus, LeaseType, LeaseChargeType, PaymentFrequency } from '../../entities/properties/propertyLeaseAgreementEntity';
 
+const CHARGE_FREQUENCIES = [
+  'one-off',
+  'daily',
+  'weekly',
+  'bi-weekly',
+  'monthly',
+  'bi-yearly',
+  'yearly',
+] as const;
+
+const PREDEFINED_CHARGES = [
+  'rent',
+  'garbage',
+  'rentDeposit',
+  'waterDeposit',
+  'electricityDeposit',
+  'custom',
+] as const;
+
+const chargeItemSchema = Joi.object({
+  chargeType: Joi.string().valid(...PREDEFINED_CHARGES).allow(Joi.string()).required(),
+  label: Joi.string().max(128).optional(),
+  amount: Joi.number().positive().required(),
+  frequency: Joi.string().valid(...CHARGE_FREQUENCIES).required(),
+  dueOn: Joi.date().optional(), // for one-off
+});
+
 const uuid = Joi.string().uuid({ version: 'uuidv4' }).messages({ 'string.guid': 'Must be a valid UUID' });
 
 export const createLeaseAgreementSchema = {
@@ -12,7 +39,6 @@ export const createLeaseAgreementSchema = {
     organizationId: uuid.required(),
     startDate: Joi.date().required(),
     endDate: Joi.date().required(),
-    amount: Joi.number().positive().required(),
     leaseType: Joi.string().valid(...Object.values(LeaseType)).optional(),
     chargeType: Joi.string().valid(...Object.values(LeaseChargeType)).optional(),
     paymentFrequency: Joi.string().valid(...Object.values(PaymentFrequency)).optional(),
@@ -23,6 +49,7 @@ export const createLeaseAgreementSchema = {
     contractHash: Joi.string().optional(),
     terms: Joi.object().optional(),
     metadata: Joi.object().optional(),
+    charges: Joi.array().items(chargeItemSchema).optional(),
   }),
 };
 
@@ -42,6 +69,7 @@ export const updateLeaseAgreementSchema = {
     contractHash: Joi.string().optional(),
     terms: Joi.object().optional(),
     metadata: Joi.object().optional(),
+    charges: Joi.array().items(chargeItemSchema).optional(),
   }),
 };
 

@@ -7,6 +7,7 @@ import propertyLeaseAgreementRepository from '../../repositories/properties/prop
 import transactionRepository from '../../repositories/transactions/transactionRepository';
 import { TransactionStatus, TransactionType } from '../../constants/transactions';
 import smsService from '../sms/smsService';
+import propertyLeasePaymentCycleService from './propertyLeasePaymentCycleService';
 
 interface CreatePaymentDTO {
   leaseId: string;
@@ -14,7 +15,10 @@ interface CreatePaymentDTO {
   amount: number;
   paidAt: Date;
   typeCode: string;
+  chargeId?: string;
+  appliesToDate?: Date;
   metadata?: Record<string, any>;
+  cycleId?: string;
 }
 
 interface UpdatePaymentDTO {
@@ -82,9 +86,20 @@ class PropertyLeasePaymentService extends BaseService<PropertyLeasePaymentEntity
       amount: data.amount,
       paidAt: data.paidAt,
       type:   { code: data.typeCode } as any,
+      ...(data.chargeId ? { charge: { id: data.chargeId } as any } : {}),
+      ...(data.cycleId ? { cycle: { id: data.cycleId } as any } : {}),
+      ...(data.appliesToDate ? { appliesToDate: data.appliesToDate as any } : {}),
       metadata: { ...data.metadata, transactionId: txn.id },
     });
     await this.cachePayment(payment);
+
+    if (data.cycleId) {
+      try {
+        await propertyLeasePaymentCycleService.applyPayment(data.cycleId, data.amount, data.paidAt);
+      } catch (err) {
+        this.logger.error('Failed to apply payment to cycle', { err, cycleId: data.cycleId, paymentId: payment.id });
+      }
+    }
 
     // fire-and-forget SMS confirmation to tenant
     try {

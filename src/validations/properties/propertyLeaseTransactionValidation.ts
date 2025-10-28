@@ -2,33 +2,31 @@ import Joi from 'joi';
 
 const uuid = Joi.string().uuid({ version: 'uuidv4' }).messages({ 'string.guid': 'Must be a valid UUID' });
 
-export const createPaymentSchema = {
+export const createLeaseTransactionSchema = {
   params: Joi.object({ propertyId: uuid.required(), unitId: uuid.required(), leaseId: uuid.required() }),
   body: Joi.object({
     tenantId: uuid.required(),
     amount: Joi.number().positive().required(),
-    paidAt: Joi.date().required(),
+    paidAt: Joi.date().optional(),
     typeCode: Joi.string().max(64).required(),
-    chargeId: uuid.optional(),
-    appliesToDate: Joi.date().optional(),
+    currency: Joi.string().length(3).optional(),
+    paymentMethodCode: Joi.string().optional(),
+    allocations: Joi.array().items(
+      Joi.object({
+        chargeId: uuid.required(),
+        amount: Joi.number().positive().required(),
+        appliesToDate: Joi.date().optional(),
+      })
+    ).optional(),
     metadata: Joi.object().optional(),
-    cycleId: uuid.optional(),
   }),
 };
 
-export const updatePaymentSchema = {
+export const updateLeaseTransactionSchema = {
   params: Joi.object({ propertyId: uuid.required(), unitId: uuid.required(), leaseId: uuid.required(), id: uuid.required() }),
   body: Joi.object({
-    amount: Joi.number().positive().optional(),
     paidAt: Joi.date().optional(),
     metadata: Joi.object().optional(),
   }),
 };
 
-export const getPaymentsInDateRangeSchema = {
-  params: Joi.object({ propertyId: uuid.required(), unitId: uuid.required(), leaseId: uuid.required() }),
-  query: Joi.object({
-    start: Joi.date().required(),
-    end: Joi.date().required(),
-  }),
-};

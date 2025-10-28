@@ -54,6 +54,33 @@ export enum PaymentFrequency {
   YEARLY = 'yearly',
 }
 
+// Frequency options for line-item charges. Separate from PaymentFrequency to allow extended values.
+export enum ChargeFrequency {
+  ONE_OFF = 'one-off',
+  DAILY = 'daily',
+  WEEKLY = 'weekly',
+  BIWEEKLY = 'bi-weekly',
+  MONTHLY = 'monthly',
+  BIYEARLY = 'bi-yearly',
+  YEARLY = 'yearly',
+}
+
+export type PredefinedChargeType =
+  | 'rent'
+  | 'garbage'
+  | 'rentDeposit'
+  | 'waterDeposit'
+  | 'electricityDeposit'
+  | 'custom';
+
+export interface LeaseChargeItem {
+  chargeType: PredefinedChargeType | string; // allow custom strings while guiding with PredefinedChargeType
+  label?: string;
+  amount: number;
+  frequency: ChargeFrequency | string; // accept normalized string at runtime
+  dueOn?: Date; // for one-off charges, optional explicit due date
+}
+
 export enum EsignatureStatus {
   PENDING = 'pending',
   SIGNED = 'signed',
@@ -192,6 +219,14 @@ export class PropertyLeaseAgreement extends BaseModel {
    */
   @OneToMany(() => PropertyLeasePaymentEntity, (payment) => payment.lease)
   payments?: PropertyLeasePaymentEntity[];
+
+  /**
+   * Optional line-item charges (e.g., rent, garbage, deposits) with individual frequencies.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  @IsOptional()
+  @IsJSON()
+  charges?: LeaseChargeItem[] | null;
 
   @CreateDateColumn()
   createdAt!: Date;

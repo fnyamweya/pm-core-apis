@@ -1,19 +1,12 @@
-import {
-  Column,
-  Entity,
-  JoinColumn,
-  ManyToOne,
-  OneToMany,
-  PrimaryGeneratedColumn,
-} from 'typeorm';
+import { Column, Entity, JoinColumn, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
 import {
   TransactionStatus,
   TransactionType,
 } from '../../constants/transactions';
 import { BaseModel } from '../baseEntity';
-import { OrderTransaction } from '../orders/orderTransactionEntity';
 import { Organization } from '../organizations/organizationEntity';
 import { UserEntity } from '../users/userEntity';
+import { PaymentMethod } from '../payments/paymentMethodEntity';
 
 @Entity('transactions')
 export class Transaction extends BaseModel {
@@ -72,4 +65,25 @@ export class Transaction extends BaseModel {
    */
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, any>;
+
+  /**
+   * Owning organization (e.g., landlord business).
+   */
+  @ManyToOne(() => Organization, { eager: true, nullable: true })
+  @JoinColumn({ name: 'organization_id' })
+  organization?: Organization | null;
+
+  /**
+   * The user who initiated/recorded the transaction (optional).
+   */
+  @ManyToOne(() => UserEntity, { eager: true, nullable: true })
+  @JoinColumn({ name: 'initiator_user_id' })
+  initiator?: UserEntity | null;
+
+  /**
+   * Payment method used (e.g., M-Pesa STK, Card, Bank), optional.
+   */
+  @ManyToOne(() => PaymentMethod, { eager: true, nullable: true })
+  @JoinColumn({ name: 'payment_method_id' })
+  paymentMethod?: PaymentMethod | null;
 }

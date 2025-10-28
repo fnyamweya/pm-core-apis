@@ -14,6 +14,8 @@ import { Organization } from '../organizations/organizationEntity';
 import { PropertyUnitTenantEntity } from './propertyUnitTenantEntity';
 import { Transaction } from '../transactions/transactionEntity';
 import { PropertyLeasePaymentType } from './propertyLeasePaymentTypeEntity';
+import PropertyLeaseCharge from './propertyLeaseChargeEntity';
+import { PropertyLeasePaymentCycleEntity } from './propertyLeasePaymentCycleEntity';
 
 
 @Entity('property_lease_payments')
@@ -50,6 +52,23 @@ export class PropertyLeasePaymentEntity extends BaseModel {
   type!: PropertyLeasePaymentType;
 
   /**
+   * Optional link to a specific charge line this payment is intended for.
+   */
+  @ManyToOne(() => PropertyLeaseCharge, { eager: true, nullable: true })
+  @JoinColumn({ name: 'charge_id' })
+  charge?: PropertyLeaseCharge | null;
+
+  /**
+   * Optional link to the generated payment cycle this payment clears.
+   */
+  @ManyToOne(() => PropertyLeasePaymentCycleEntity, (cycle) => cycle.payments, {
+    eager: true,
+    nullable: true,
+  })
+  @JoinColumn({ name: 'cycle_id' })
+  cycle?: PropertyLeasePaymentCycleEntity | null;
+
+  /**
    * Amount paid.
    */
   @Column({ type: 'decimal', precision: 15, scale: 2 })
@@ -77,6 +96,13 @@ export class PropertyLeasePaymentEntity extends BaseModel {
   @Column({ type: 'timestamp', nullable: false })
   @IsNotEmpty()
   paidAt!: Date;
+
+  /**
+   * Optional: the schedule occurrence date (due date) this payment applies to.
+   * This enables precise allocation for recurring charges.
+   */
+  @Column({ type: 'date', nullable: true })
+  appliesToDate?: Date | null;
 
   /**
    * Extra metadata (for method, split payment details, notes, etc.).

@@ -2,72 +2,15 @@ import { Server } from 'http';
 import 'reflect-metadata';
 import app from './app';
 import databaseInstance from './config/database';
-import { redisManager } from './config/redis';
-import { currentEnvironment } from './config/env';
+import { currentEnvironment, initializeSecrets, createEnvConfiguration } from './config/env';
 import { logger } from './utils/logger';
-import { initializeSecrets, createEnvConfiguration } from './config/env';
 
 const port = Number(process.env.PORT || 5000);
-
 let server: Server | null = null;
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | null = null;
 
-const gracefulShutdown = (reason: string, exitCode = 0) => {
-  if (shuttingDown) return shutdownPromise ?? Promise.resolve();
-  shuttingDown = true;
-
-  logger.info(`${reason} received`);
-
-  shutdownPromise = new Promise<void>((resolve) => {
-    const forceTimeout = setTimeout(async () => {
-      logger.warn('Forcing shutdown due to timeout');
-      try { await databaseInstance.close(); } catch {}
-      try { await redisManager.close(); } catch {}
-      process.exit(1);
-    }, 10_000);
-
-    const closeServer = async () => {
-      if (!server) return;
-      await new Promise<void>((res) => server!.close(() => res()));
-      logger.info('Server closed');
-    };
-
-    (async () => {
-      try {
-        await closeServer();
-      } catch (e) {
-        logger.error('Error closing HTTP server:', e);
-      }
-
-      try {
-        await databaseInstance.close();
-        logger.info('Database connection closed');
-      } catch (dbError) {
-        logger.error('Error closing database connection:', dbError);
-      }
-
-      try {
-        await redisManager.close();
-        logger.info('Redis connections closed');
-      } catch (rError) {
-        logger.error('Error closing Redis connections:', rError);
-      }
-
-      clearTimeout(forceTimeout);
-      resolve();
-      process.exit(exitCode);
-    })().catch((e) => {
-      logger.error('Unexpected error during shutdown:', e);
-      clearTimeout(forceTimeout);
-      process.exit(1);
-    });
-  });
-
-  return shutdownPromise;
-};
-
-const startServer = async () => {
+async function start() {
   try {
     await initializeSecrets();
     const envConfiguration = createEnvConfiguration();
@@ -79,30 +22,64 @@ const startServer = async () => {
     server = app.listen(port, () => {
       logger.info(`Server started on port ${port} in ${currentEnvironment} mode.`);
     });
-
-    (server as any).timeout = 10_000;
+    server.timeout = 10_000;
   } catch (error) {
     logger.error('Failed to start the server:', error);
     process.exit(1);
   }
-};
+}
 
-process.once('uncaughtException', (error) => {
+async function shutdown(signal: string) {
+  if (shuttingDown) return shutdownPromise ?? Promise.resolve();
+  shuttingDown = true;
+  logger.info(`${signal} received`);
+
+  shutdownPromise = (async () => {
+    const s = server;
+    server = null;
+
+    if (s) {
+      await Promise.race([
+        new Promise<void>((resolve) => s.close(() => {
+          logger.info('Server closed');
+          resolve();
+        })),
+        new Promise<void>((resolve) =>
+          setTimeout(() => {
+            logger.warn('Forcing server close after 10s timeout');
+            resolve();
+          }, 10_000)
+        ),
+      ]);
+    }
+
+    try {
+      await databaseInstance.close();
+      logger.info('Database connection closed');
+    } catch (err) {
+      const msg = (err as Error)?.message ?? '';
+      if (msg.includes('Called end on pool more than once')) {
+        logger.warn('Pool already ended; ignoring duplicate close');
+      } else {
+        logger.error('Error closing database connection:', err);
+      }
+    }
+
+    process.exit(0);
+  })();
+
+  return shutdownPromise;
+}
+
+process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+process.on('SIGINT', () => { void shutdown('SIGINT'); });
+process.on('uncaughtException', (error) => {
   logger.error(`Uncaught Exception: ${error.message}`, error);
-  void gracefulShutdown('uncaughtException', 1);
+  void shutdown('uncaughtException');
+});
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled Rejection:', reason as any);
+  void shutdown('unhandledRejection');
 });
 
-process.once('unhandledRejection', (reason) => {
-  logger.error('Unhandled Rejection:', reason);
-  void gracefulShutdown('unhandledRejection', 1);
-});
-
-process.once('SIGTERM', () => {
-  void gracefulShutdown('SIGTERM', 0);
-});
-
-process.once('SIGINT', () => {
-  void gracefulShutdown('SIGINT', 0);
-});
-
-void startServer();
+void start();

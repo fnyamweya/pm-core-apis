@@ -1,4 +1,4 @@
-import { PropertyLeaseAgreement, LeaseStatus, LeaseType, LeaseChargeType, PaymentFrequency } from '../../entities/properties/propertyLeaseAgreementEntity';
+import { PropertyLeaseAgreement, LeaseStatus, LeaseType, LeaseChargeType, PaymentFrequency, ChargeFrequency, LeaseChargeItem } from '../../entities/properties/propertyLeaseAgreementEntity';
 import propertyLeaseAgreementRepository from '../../repositories/properties/propertyLeaseAgreementRepository';
 import { logger } from '../../utils/logger';
 import RedisCache from '../../utils/redisCache';
@@ -12,7 +12,6 @@ interface CreateLeaseAgreementDTO {
   organizationId: string;
   startDate: Date;
   endDate: Date;
-  amount: number;
   leaseType?: LeaseType;
   chargeType?: LeaseChargeType;
   paymentFrequency?: PaymentFrequency;
@@ -24,6 +23,13 @@ interface CreateLeaseAgreementDTO {
   terms?: Record<string, any>;
   metadata?: Record<string, any>;
   propertyId?: string; // for cross-checking organization
+  charges?: Array<{
+    chargeType: string;
+    label?: string;
+    amount: number;
+    frequency: string;
+    dueOn?: Date | string;
+  }>;
 }
 
 interface UpdateLeaseAgreementDTO {
@@ -40,6 +46,13 @@ interface UpdateLeaseAgreementDTO {
   contractHash?: string;
   terms?: Record<string, any>;
   metadata?: Record<string, any>;
+  charges?: Array<{
+    chargeType: string;
+    label?: string;
+    amount: number;
+    frequency: string;
+    dueOn?: Date | string;
+  }>;
 }
 
 class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> {
@@ -112,6 +125,30 @@ class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> 
     return d;
   }
 
+  // ---------- charges normalization helpers ----------
+  private normalizeChargeFrequency(freq: string): ChargeFrequency {
+    const f = (freq || '').toLowerCase();
+    if (f === 'one-off' || f === 'oneoff' || f === 'one_off') return ChargeFrequency.ONE_OFF;
+    if (f === 'daily') return ChargeFrequency.DAILY;
+    if (f === 'weekly') return ChargeFrequency.WEEKLY;
+    if (f === 'biweekly' || f === 'bi-weekly') return ChargeFrequency.BIWEEKLY;
+    if (f === 'monthly') return ChargeFrequency.MONTHLY;
+    if (f === 'biyearly' || f === 'bi-yearly' || f === 'semiannual' || f === 'semi-annual') return ChargeFrequency.BIYEARLY;
+    if (f === 'yearly' || f === 'annually' || f === 'annual') return ChargeFrequency.YEARLY;
+    return ChargeFrequency.MONTHLY;
+  }
+
+  private normalizeCharges(raw?: CreateLeaseAgreementDTO['charges']): LeaseChargeItem[] | undefined {
+    if (!raw || !Array.isArray(raw)) return undefined;
+    return raw.map((c) => ({
+      chargeType: (c.chargeType || 'custom') as any,
+      label: c.label,
+      amount: Number(c.amount),
+      frequency: this.normalizeChargeFrequency(c.frequency),
+      dueOn: c.dueOn ? new Date(c.dueOn) : undefined,
+    }));
+  }
+
   private firstDueOnOrAfter(
     start: Date,
     firstPayment: Date,
@@ -152,24 +189,74 @@ class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> 
   }
 
   // ---------- Reporting helpers ----------
-  public buildBillingSchedule(lease: PropertyLeaseAgreement): Array<{
-    dueDate: Date;
-    amountDue: number;
-  }> {
+  public buildBillingSchedule = (lease: PropertyLeaseAgreement): Array<{ dueDate: Date; amountDue: number }> => {
     const start = this.toDateOnly(lease.startDate);
     const end = this.toDateOnly(lease.endDate);
-    const freq = (lease.paymentFrequency || PaymentFrequency.MONTHLY) as PaymentFrequency;
-    const first = this.toDateOnly((lease as any).firstPaymentDate || lease.startDate);
-    const periods: Array<{ dueDate: Date; amountDue: number }> = [];
+    const events: Array<{ dueDate: Date; amount: number }> = [];
+    const leaseId = (lease as any).id as string;
 
-    // start from first due on or after start
-    let due = this.firstDueOnOrAfter(start, first, freq);
-    while (due <= end) {
-      periods.push({ dueDate: new Date(due), amountDue: Number(lease.amount) });
-      due = this.addByFrequency(due, freq);
-      if (periods.length > 1000) break; // safety guard
+    // Synchronously compute from charges fetched on-demand.
+    // Note: this method is used in request flows; avoid heavy queries.
+    // We do a blocking require to avoid import cycles.
+    const repo = require('../../repositories/properties/propertyLeaseChargeRepository').default as any;
+    const charges = repo ? repo.findSync?.() : null; // placeholder, repo has async methods only
+    // Since repository is async, use alternative: a cached field if controller enriched lease; else return empty here.
+    // To provide consistent behavior, we will return empty here and rely on ledger endpoints to compute using DB.
+    // If we have charges attached via (lease as any).chargesList, use them.
+    const attached = (lease as any).chargesList as Array<any> | undefined;
+    const source = attached ?? [];
+
+    for (const ch of source) {
+      const freq = (ch.frequency || '').toString();
+      const amt = Number(ch.amount || 0);
+      if (!(amt > 0)) continue;
+      // Charges follow the lease window. One-off occurs at lease start.
+      const s = start;
+      const e = end;
+
+      const step = (d: Date): Date => {
+        const c = new Date(d);
+        switch (freq) {
+          case 'daily': c.setDate(c.getDate() + 1); break;
+          case 'weekly': c.setDate(c.getDate() + 7); break;
+          case 'bi-weekly': c.setDate(c.getDate() + 14); break;
+          case 'quarterly': c.setMonth(c.getMonth() + 3); break;
+          case 'monthly': c.setMonth(c.getMonth() + 1); break;
+          case 'bi-yearly': c.setMonth(c.getMonth() + 6); break;
+          case 'yearly': c.setFullYear(c.getFullYear() + 1); break;
+          default: return new Date(8640000000000000);
+        }
+        return c;
+      };
+
+      if (freq === 'one-off') {
+        const when = s;
+        if (when >= start && when <= end) events.push({ dueDate: when, amount: amt });
+        continue;
+      }
+      let iter = new Date(s);
+      while (iter < start) iter = step(iter);
+      while (iter <= e && iter <= end) {
+        events.push({ dueDate: new Date(iter), amount: amt });
+        const n = step(iter);
+        if (n <= iter) break;
+        iter = n;
+        if (events.length > 5000) break;
+      }
     }
-    return periods;
+
+    const map = new Map<string, number>();
+    for (const e of events) {
+      const k = `${e.dueDate.getFullYear()}-${e.dueDate.getMonth()}-${e.dueDate.getDate()}`;
+      map.set(k, (map.get(k) || 0) + e.amount);
+    }
+    const out: Array<{ dueDate: Date; amountDue: number }> = [];
+    for (const [k, v] of map.entries()) {
+      const [y, m, d] = k.split('-').map(Number);
+      out.push({ dueDate: new Date(y, m, d), amountDue: v });
+    }
+    out.sort((a, b) => a.dueDate.getTime() - b.dueDate.getTime());
+    return out;
   }
 
   public async getLeaseLedger(leaseId: string): Promise<{
@@ -178,6 +265,8 @@ class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> 
     totals: { totalDue: number; totalPaid: number; outstanding: number };
   }> {
     const lease = await this.getById(leaseId);
+    const charges = await (await import('../../repositories/properties/propertyLeaseChargeRepository')).default.getByLease(leaseId);
+    (lease as any).chargesList = charges;
     const schedule = this.buildBillingSchedule(lease);
 
     // Fetch payments for this lease
@@ -238,6 +327,8 @@ class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> 
 
     const out: Array<{ leaseId: string; unitId: string; tenantId: string; due: number; paid: number; balance: number }> = [];
     for (const lease of leases) {
+      const charges = await (await import('../../repositories/properties/propertyLeaseChargeRepository')).default.getByLease(lease.id);
+      (lease as any).chargesList = charges;
       const schedule = this.buildBillingSchedule(lease);
       const monthPeriods = schedule.filter(p => p.dueDate >= monthStart && p.dueDate <= monthEnd);
       if (!monthPeriods.length) continue; // no due this month
@@ -266,6 +357,8 @@ class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> 
     const rows: Array<{ leaseId: string; tenantId: string; unitId: string; outstanding: number; maxDaysPastDue: number }> = [];
 
     for (const lease of leases) {
+      const charges = await (await import('../../repositories/properties/propertyLeaseChargeRepository')).default.getByLease(lease.id);
+      (lease as any).chargesList = charges;
       const schedule = this.buildBillingSchedule(lease);
       const periods = schedule.filter(p => p.dueDate <= asOf);
       if (!periods.length) continue;
@@ -312,9 +405,7 @@ class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> 
     if (!data.startDate || !data.endDate) {
       throw new Error('startDate and endDate are required');
     }
-    if (!(data.amount > 0)) {
-      throw new Error('amount must be a positive number');
-    }
+    // amount removed from create; charges live in lease_charges.
 
     const start = this.toDateOnly(data.startDate);
     const end = this.toDateOnly(data.endDate);
@@ -325,9 +416,7 @@ class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> 
     const leaseType = data.leaseType ?? LeaseType.FIXED_TERM;
     const chargeType = data.chargeType ?? LeaseChargeType.RENT;
     const paymentFrequency = data.paymentFrequency ?? PaymentFrequency.MONTHLY;
-    const firstPaymentDate = this.toDateOnly(
-      data.firstPaymentDate ?? data.startDate
-    );
+    const firstPaymentDate = this.toDateOnly(data.firstPaymentDate ?? data.startDate);
 
     // Derive billing schedule metadata for client dashboards/automation
     const nextDueDate = this.firstDueOnOrAfter(
@@ -391,7 +480,7 @@ class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> 
       organization: { id: organizationId } as any,
       startDate: start as any,
       endDate: end as any,
-      amount: data.amount,
+      amount: 0,
       leaseType,
       chargeType,
       paymentFrequency,
@@ -402,6 +491,7 @@ class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> 
       contractHash: data.contractHash,
       terms: mergedTerms,
       metadata: data.metadata,
+      charges: this.normalizeCharges((data as any).charges),
     });
 
     await this.cacheLease(lease);
@@ -498,6 +588,16 @@ class PropertyLeaseAgreementService extends BaseService<PropertyLeaseAgreement> 
     this.logger.info('Deleting lease agreement', { leaseId });
     await this.repository.delete(leaseId);
     await this.invalidateLeaseCache(leaseId);
+  }
+
+  /**
+   * Compute the billing schedule preview for a lease from its charges.
+   */
+  public async getLeaseSchedule(leaseId: string): Promise<Array<{ dueDate: Date; amountDue: number }>> {
+    const lease = await this.getById(leaseId);
+    const charges = await (await import('../../repositories/properties/propertyLeaseChargeRepository')).default.getByLease(leaseId);
+    (lease as any).chargesList = charges;
+    return this.buildBillingSchedule(lease);
   }
 
   async findLeasesNeedingEsignatureReminders(

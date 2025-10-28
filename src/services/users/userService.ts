@@ -13,6 +13,7 @@ import smsService from '../sms/smsService';
 import { generateNewUserPin } from '../../templates/sms/newUserPin';
 import { SmsProviderError } from '../sms/providers/interfaces/smsProvider';
 import { Organization } from '@/entities/organizations/organizationEntity';
+import { ConflictError } from '../../errors/httpErrors';
 
 interface CreateUserDTO {
   email: string;
@@ -73,6 +74,15 @@ class UserService extends BaseService<UserEntity> {
       throw new Error('Invalid phone number format');
     }
 
+    // Uniqueness checks: email and phone must be unique
+    const [existingByEmail, existingByPhone] = await Promise.all([
+      this.getByEmail(data.email),
+      this.getByPhone(standardizedPhone),
+    ]);
+    if (existingByEmail || existingByPhone) {
+      throw new ConflictError('User with this email or phone already exists.');
+    }
+
     const user = await this.repository.create({
       email: data.email,
       phone: standardizedPhone,
@@ -108,12 +118,21 @@ class UserService extends BaseService<UserEntity> {
     const standardizedPhone = formatPhoneNumber(data.phone);
     if (!standardizedPhone) throw new Error('Invalid phone number format');
 
-    let user = await this.getByEmail(data.email);
-    if (!user) {
-      user = await this.createUser({ email: data.email, phone: standardizedPhone, firstName: data.firstName, lastName: data.lastName });
-    } else if (user.phone !== standardizedPhone) {
-      throw new Error('Phone does not match existing account');
+    // Prevent duplicate registrations by email or phone
+    const [existingByEmail, existingByPhone] = await Promise.all([
+      this.getByEmail(data.email),
+      this.getByPhone(standardizedPhone),
+    ]);
+    if (existingByEmail || existingByPhone) {
+      throw new ConflictError('User with this email or phone already exists.');
     }
+
+    const user = await this.createUser({
+      email: data.email,
+      phone: standardizedPhone,
+      firstName: data.firstName,
+      lastName: data.lastName,
+    });
 
     const code            = Math.floor(100000 + Math.random() * 900000).toString();
     const validityMinutes = 10;

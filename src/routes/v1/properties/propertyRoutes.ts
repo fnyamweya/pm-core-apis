@@ -7,7 +7,10 @@ import PropertyOwnerController from '../../../controllers/properties/propertyOwn
 import PropertyStaffController from '../../../controllers/properties/propertyStaffController';
 import PropertyRequestController from '../../../controllers/properties/propertyRequestController';
 import PropertyLeaseAgreementController from '../../../controllers/properties/propertyLeaseAgreementController';
+import PropertyLeaseChargeController from '../../../controllers/properties/propertyLeaseChargeController';
 import PropertyLeasePaymentController from '../../../controllers/properties/propertyLeasePaymentController';
+import PropertyLeaseTransactionController from '../../../controllers/properties/propertyLeaseTransactionController';
+import PropertyLeasePaymentCycleController from '../../../controllers/properties/propertyLeasePaymentCycleController';
 
 import authenticate from '../../../middlewares/auth/authenticate';
 import orgScope from '../../../middlewares/auth/orgScope';
@@ -73,6 +76,20 @@ import {
   updatePaymentSchema,
   getPaymentsInDateRangeSchema,
 } from '../../../validations/properties/propertyLeasePaymentValidation';
+import {
+  generatePaymentCyclesSchema,
+  listLeaseDueCyclesSchema,
+  listTenantDueCyclesSchema,
+} from '../../../validations/properties/propertyLeasePaymentCycleValidation';
+import {
+  createLeaseTransactionSchema,
+  updateLeaseTransactionSchema,
+} from '../../../validations/properties/propertyLeaseTransactionValidation';
+import {
+  createLeaseChargeSchema,
+  updateLeaseChargeSchema,
+  getTenantDueChargesSchema,
+} from '../../../validations/properties/propertyLeaseChargeValidation';
 
 const router = Router();
 
@@ -125,13 +142,12 @@ const router = Router();
  *         updatedAt: { type: string, format: date-time }
  *     LeaseCreateRequest:
  *       type: object
- *       required: [tenantId, organizationId, startDate, endDate, amount]
+ *       required: [tenantId, organizationId, startDate, endDate]
  *       properties:
  *         tenantId: { type: string, description: "PropertyUnitTenantEntity ID" }
  *         organizationId: { type: string, description: "Organization ID owning the property" }
  *         startDate: { type: string, format: date }
  *         endDate: { type: string, format: date }
- *         amount: { type: number }
  *         leaseType: { type: string, enum: [fixed_term, periodic] }
  *         chargeType: { type: string, enum: [rent, other] }
  *         paymentFrequency: { type: string, enum: [weekly, biweekly, monthly, quarterly, yearly] }
@@ -1596,6 +1612,44 @@ router.post(
   asyncHandler(PropertyLeaseAgreementController.createLeaseAgreement.bind(PropertyLeaseAgreementController))
 );
 
+/** Lease Charge Routes */
+router.post(
+  '/:propertyId/units/:unitId/leases/:leaseId/charges',
+  authenticate('access'),
+  requireOrgRoleForProperty('propertyId', [OrganizationUserRole.OWNER, OrganizationUserRole.CARETAKER]),
+  validate(createLeaseChargeSchema),
+  asyncHandler(PropertyLeaseChargeController.create.bind(PropertyLeaseChargeController))
+);
+
+router.get(
+  '/:propertyId/units/:unitId/leases/:leaseId/charges',
+  authenticate('access'),
+  requireOrgRoleForProperty('propertyId', [OrganizationUserRole.OWNER, OrganizationUserRole.CARETAKER]),
+  asyncHandler(PropertyLeaseChargeController.list.bind(PropertyLeaseChargeController))
+);
+
+router.put(
+  '/:propertyId/units/:unitId/leases/:leaseId/charges/:chargeId',
+  authenticate('access'),
+  requireOrgRoleForProperty('propertyId', [OrganizationUserRole.OWNER, OrganizationUserRole.CARETAKER]),
+  validate(updateLeaseChargeSchema),
+  asyncHandler(PropertyLeaseChargeController.update.bind(PropertyLeaseChargeController))
+);
+
+router.delete(
+  '/:propertyId/units/:unitId/leases/:leaseId/charges/:chargeId',
+  authenticate('access'),
+  requireOrgRoleForProperty('propertyId', [OrganizationUserRole.OWNER, OrganizationUserRole.CARETAKER]),
+  asyncHandler(PropertyLeaseChargeController.remove.bind(PropertyLeaseChargeController))
+);
+
+// Notify due charges today (cron/ops)
+router.post(
+  '/leases/charges/notify-due',
+  authenticate('access'),
+  asyncHandler(PropertyLeaseChargeController.notifyDue.bind(PropertyLeaseChargeController))
+);
+
 /**
  * @route GET /properties/:propertyId/leases/rent-roll
  * @desc  Rent roll for a property and month
@@ -1815,6 +1869,31 @@ router.get(
   '/leases/:id/ledger',
   authenticate('access'),
   asyncHandler(PropertyLeaseAgreementController.getLeaseLedger.bind(PropertyLeaseAgreementController))
+);
+
+/**
+ * @route GET /leases/:id/schedule
+ * @desc  Preview computed billing schedule for a lease from charges
+ * @access Protected
+ * @openapi
+ * /leases/{id}/schedule:
+ *   get:
+ *     tags: [Properties]
+ *     summary: Preview schedule for a lease
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200: { description: OK }
+ */
+router.get(
+  '/leases/:id/schedule',
+  authenticate('access'),
+  asyncHandler(PropertyLeaseAgreementController.getLeaseSchedulePreview.bind(PropertyLeaseAgreementController))
 );
 
 /**
@@ -2196,6 +2275,18 @@ router.post(
 );
 
 /**
+ * @route POST /leases/:leaseId/payment-cycles/generate
+ * @desc   Generate payment cycles for a lease up to a given date
+ * @access Protected
+ */
+router.post(
+  '/leases/:leaseId/payment-cycles/generate',
+  authenticate('access'),
+  validate(generatePaymentCyclesSchema),
+  asyncHandler(PropertyLeasePaymentCycleController.generateForLease.bind(PropertyLeasePaymentCycleController))
+);
+
+/**
  * @route PUT /properties/:propertyId/units/:unitId/leases/:leaseId/payments/:id
  * @desc   Update a lease payment
  * @access Protected
@@ -2267,6 +2358,27 @@ router.get(
   asyncHandler(PropertyLeasePaymentController.getPaymentsByLease.bind(PropertyLeasePaymentController))
 );
 
+/** -------------------- Lease Transaction Routes (new) -------------------- */
+router.post(
+  '/:propertyId/units/:unitId/leases/:leaseId/transactions',
+  authenticate('access'),
+  requireOrgRoleForProperty('propertyId', [OrganizationUserRole.OWNER, OrganizationUserRole.CARETAKER]),
+  validate(createLeaseTransactionSchema),
+  asyncHandler(PropertyLeaseTransactionController.create.bind(PropertyLeaseTransactionController))
+);
+
+router.get(
+  '/:propertyId/units/:unitId/leases/:leaseId/transactions',
+  authenticate('access'),
+  asyncHandler(PropertyLeaseTransactionController.listByLease.bind(PropertyLeaseTransactionController))
+);
+
+router.get(
+  '/tenants/:tenantId/transactions',
+  authenticate('access'),
+  asyncHandler(PropertyLeaseTransactionController.listByTenant.bind(PropertyLeaseTransactionController))
+);
+
 /**
  * @route POST /properties/:propertyId/units/:unitId/leases/:leaseId/payments/remind
  * @desc   Send due payment reminder SMS to tenant if due
@@ -2318,6 +2430,77 @@ router.get(
   '/tenants/:tenantId/payments',
   authenticate('access'),
   asyncHandler(PropertyLeasePaymentController.getPaymentsByTenant.bind(PropertyLeasePaymentController))
+);
+
+/**
+ * @route GET /leases/:leaseId/payment-cycles/due
+ * @desc   List due payment cycles for a lease
+ * @access Protected
+ */
+router.get(
+  '/leases/:leaseId/payment-cycles/due',
+  authenticate('access'),
+  validate(listLeaseDueCyclesSchema),
+  asyncHandler(PropertyLeasePaymentCycleController.listDueForLease.bind(PropertyLeasePaymentCycleController))
+);
+
+/**
+ * @route GET /tenants/:tenantId/payment-cycles/due
+ * @desc   List due payment cycles for the authenticated tenant
+ * @access Protected
+ */
+router.get(
+  '/tenants/:tenantId/payment-cycles/due',
+  authenticate('access'),
+  validate(listTenantDueCyclesSchema),
+  asyncHandler(PropertyLeasePaymentCycleController.listDueForTenant.bind(PropertyLeasePaymentCycleController))
+);
+
+/**
+ * @route GET /properties/tenants/:tenantId/charges/due
+ * @desc   View outstanding due charges for a tenant; filter by dates
+ * @access Protected
+ * @openapi
+ * /properties/tenants/{tenantId}/charges/due:
+ *   get:
+ *     tags: [Properties]
+ *     summary: Get due charges for a tenant
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: tenantId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: from
+ *         required: false
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: to
+ *         required: false
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: asOf
+ *         required: false
+ *         schema: { type: string, format: date }
+ *       - in: query
+ *         name: leaseId
+ *         required: false
+ *         schema: { type: string }
+ *       - in: query
+ *         name: chargeType
+ *         required: false
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: OK
+ */
+router.get(
+  '/tenants/:tenantId/charges/due',
+  authenticate('access'),
+  validate(getTenantDueChargesSchema),
+  asyncHandler(PropertyLeaseChargeController.getDueByTenant.bind(PropertyLeaseChargeController))
 );
 
 /**
